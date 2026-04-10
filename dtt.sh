@@ -2889,6 +2889,9 @@ class Agent:
         try:
             params = {"q": query, "format": "json", "categories": categories or "general"}
             if time_range:
+                # SearXNG doesn't support 'week'; use 'month' as nearest
+                if time_range == "week":
+                    time_range = "month"
                 params["time_range"] = time_range
             resp = await self.http.get(
                 f"{self.searxng.url}/search",
@@ -4020,6 +4023,7 @@ class Agent:
                     "messages": self.messages,
                     "tools": list(TOOLS) + self.mcp_manager.get_tool_definitions(),
                     "tool_choice": "auto",
+                    "parallel_tool_calls": True,
                     "temperature": 0.2,
                     "max_tokens": 16384,
                     # Enable extended thinking / reasoning
