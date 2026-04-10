@@ -208,6 +208,7 @@ except ImportError:
 # Constants
 # ═══════════════════════════════════════════════════════════════════
 BASE            = Path("/tmp/dothething")
+VENV            = BASE / "venv"
 DTT_DIR         = Path.home() / ".dtt" / "threads"
 OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
@@ -2545,7 +2546,6 @@ class Agent:
         self.mcp_manager = MCPManager()
         # For serial-work detection and pre-finalize validation
         self._tool_call_patterns = []
-        self._finalize_check_done = False
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
