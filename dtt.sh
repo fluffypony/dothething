@@ -3,8 +3,53 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
+DTT_VERSION="1.0.0"
+DTT_SELF="$(realpath "$0" 2>/dev/null || (cd "$(dirname "$0")" && pwd -P)/$(basename "$0"))"
+
 BASE="/tmp/dothething"
 VENV="$BASE/venv"
+
+# ── Auto-update ─────────────────────────────────────────────────
+dtt_update() (
+    set +e
+    check_file="$HOME/.dtt/last-update"
+    mkdir -p "$HOME/.dtt"
+
+    now=$(date +%s)
+    if [ -f "$check_file" ]; then
+        last=$(cat "$check_file" 2>/dev/null || echo 0)
+        [ "$((now - last))" -lt 21600 ] && return 0
+    fi
+    echo "$now" > "$check_file"
+
+    remote=$(curl -sfL --max-time 5 "https://dotheth.ing/VERSION" 2>/dev/null | tr -d '[:space:]')
+    [ -z "$remote" ] && return 0
+    [ "$remote" = "$DTT_VERSION" ] && return 0
+
+    IFS=. read -ra rv <<< "$remote"
+    IFS=. read -ra lv <<< "$DTT_VERSION"
+    newer=false
+    for ((i = 0; i < ${#rv[@]} || i < ${#lv[@]}; i++)); do
+        [ "${rv[i]:-0}" -gt "${lv[i]:-0}" ] 2>/dev/null && { newer=true; break; }
+        [ "${rv[i]:-0}" -lt "${lv[i]:-0}" ] 2>/dev/null && return 0
+    done
+    $newer || return 0
+
+    echo "▸ Updating dothething: $DTT_VERSION → $remote" >&2
+    tmp=$(mktemp)
+    if curl -sfL --max-time 30 "https://raw.githubusercontent.com/fluffypony/dothething/main/dtt.sh" \
+         -o "$tmp" && [ -s "$tmp" ] && head -1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
+        chmod +x "$tmp"
+        if mv -f "$tmp" "$DTT_SELF"; then
+            echo "▸ Updated to $remote ✓" >&2
+        else
+            rm -f "$tmp"
+            echo "▸ Update available ($remote) but could not write to $DTT_SELF" >&2
+        fi
+    else
+        rm -f "$tmp"
+    fi
+)
 
 KEEP_TEMP=false
 PASS_ARGS=()
@@ -45,6 +90,7 @@ HELP
 done
 
 mkdir -p "$BASE"
+dtt_update
 
 for required in python3 git; do
   if ! command -v "$required" >/dev/null 2>&1; then
@@ -3166,4 +3212,6 @@ if __name__ == "__main__":
     main()
 PYTHON_AGENT
 
-exec python "$BASE/agent.py" "$@"
+python "$BASE/agent.py" "$@" && _dtt_status=0 || _dtt_status=$?
+dtt_update
+exit "$_dtt_status"
