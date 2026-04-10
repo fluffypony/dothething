@@ -130,13 +130,11 @@ cat > "$BASE/agent.py" << 'PYTHON_AGENT'
 #!/usr/bin/env python3
 """dothething — autonomous AI agent | https://dotheth.ing"""
 
-import os, sys, json, time, asyncio, signal, subprocess, socket, re, atexit
-import glob as glob_mod, threading, argparse, shlex, shutil, textwrap, traceback
+import os, sys, json, time, asyncio, subprocess, socket, re, atexit
+import threading, argparse, shlex, shutil, traceback
 import fnmatch, difflib, hashlib, base64, mimetypes, uuid
 from pathlib import Path
 from datetime import datetime, timezone
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import httpx
@@ -702,10 +700,6 @@ class Plan:
             id_set = set(ids)
             self.items = [i for i in self.items if i["id"] not in id_set]
             return self._fmt()
-
-    def snapshot(self):
-        with self._lock:
-            return {"items": [dict(i) for i in self.items]}
 
 
 # ═══════════════════════════════════════════════════════════════════
