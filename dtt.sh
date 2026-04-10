@@ -126,13 +126,13 @@ if [ ! -d "$VENV" ]; then
 fi
 source "$VENV/bin/activate"
 
-if [ ! -f "$BASE/.deps_v4" ]; then
+if [ ! -f "$BASE/.deps_v5" ]; then
     echo "▸ Installing dependencies (first run)..."
     pip install -q -U pip setuptools wheel 2>/dev/null
     pip install -q requests httpx "prompt_toolkit>=3" "camoufox[geoip]" playwright \
         html-to-markdown lxml beautifulsoup4 pyyaml Pillow \
-        markitdown pypdf python-docx openpyxl tabulate 2>/dev/null
-    touch "$BASE/.deps_v4"
+        markitdown pypdf python-docx openpyxl tabulate mcp 2>/dev/null
+    touch "$BASE/.deps_v5"
 fi
 
 # ── SearXNG in its own venv ──────────────────────────────────────
@@ -184,6 +184,7 @@ cat > "$BASE/agent.py" << 'PYTHON_AGENT'
 import os, sys, json, time, asyncio, subprocess, socket, re, atexit
 import threading, argparse, shlex, shutil, traceback
 import fnmatch, difflib, hashlib, base64, mimetypes, uuid
+import tempfile, contextlib
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -195,6 +196,13 @@ try:
     from PIL import Image
 except Exception:
     Image = None
+
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    HAS_MCP = True
+except ImportError:
+    HAS_MCP = False
 
 # ═══════════════════════════════════════════════════════════════════
 # Constants
