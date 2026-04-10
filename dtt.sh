@@ -352,7 +352,8 @@ class Browser:
                 self._browser = await self._cm.__aenter__()
         return self._browser
 
-    async def fetch(self, url, mode="markdown", screenshot_region="above", timeout_ms=45000):
+    async def fetch(self, url, mode="markdown", screenshot_region="above", timeout_ms=45000,
+                    extract_selector=None, wait_for=None):
         try:
             browser = await self._ensure()
             page = await browser.new_page()
@@ -364,6 +365,33 @@ class Browser:
         try:
             await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
             await page.wait_for_timeout(1500)
+
+            # Dismiss cookie consent banners
+            try:
+                await page.evaluate("""() => {
+                    const selectors = [
+                        '[class*="cookie"] button[class*="accept"]',
+                        '[class*="cookie"] button[class*="agree"]',
+                        '[id*="cookie"] button[class*="accept"]',
+                        '[class*="consent"] button[class*="accept"]',
+                        'button[id*="accept-cookies"]',
+                        '.cc-btn.cc-dismiss',
+                    ];
+                    for (const sel of selectors) {
+                        const btn = document.querySelector(sel);
+                        if (btn) { btn.click(); break; }
+                    }
+                }""")
+                await page.wait_for_timeout(500)
+            except Exception:
+                pass
+
+            # Wait for specific selector if requested
+            if wait_for:
+                try:
+                    await page.wait_for_selector(wait_for, timeout=10000)
+                except Exception:
+                    pass
 
             if mode == "screenshot":
                 if screenshot_region == "full":
@@ -390,6 +418,18 @@ class Browser:
             elif mode == "html":
                 return await page.content()
             else:
+                # Extract specific element if selector provided
+                if extract_selector:
+                    try:
+                        await page.evaluate(
+                            """(sel) => {
+                                const el = document.querySelector(sel);
+                                if (el) { document.body.innerHTML = el.outerHTML; }
+                            }""",
+                            extract_selector,
+                        )
+                    except Exception:
+                        pass
                 return await self._to_markdown(page)
         except Exception as e:
             return f"Error fetching {url}: {e}"
@@ -1819,12 +1859,13 @@ Thread: {thread_id}
 # ═══════════════════════════════════════════════════════════════════
 class Agent:
     DISPATCH = {
+        # Existing tools
         "read_file":       "_tool_read_file",
         "write_file":      "_tool_write_file",
         "glob":            "_tool_glob",
         "edit_file":       "_tool_edit_file",
         "search_file":     "_tool_search_file",
-        "run_command":      "_tool_run_command",
+        "run_command":     "_tool_run_command",
         "search_web":      "_tool_search_web",
         "fetch_page":      "_tool_fetch_page",
         "plan_create":     "_tool_plan_create",
@@ -1833,6 +1874,17 @@ class Agent:
         "think":           "_tool_think",
         "oracle":          "_tool_oracle",
         "finalize":        "_tool_finalize",
+        # New tools
+        "list_dir":        "_tool_list_dir",
+        "http_request":    "_tool_http_request",
+        "analyze_image":   "_tool_analyze_image",
+        "notes_add":       "_tool_notes_add",
+        "notes_read":      "_tool_notes_read",
+        "notes_clear":     "_tool_notes_clear",
+        "batch_read":      "_tool_batch_read",
+        "plan_update":     "_tool_plan_update",
+        "delegate":        "_tool_delegate",
+        "diff_files":      "_tool_diff_files",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False):
@@ -1848,12 +1900,26 @@ class Agent:
         self.browser = Browser()
         self.cost_tracker = CostTracker(api_key)
         self.plan = Plan()
+        self.notes = Notes()
         self.spinner = Spinner(enabled=not verbose)
         self.thread_logger = None
         self.http = None
         self._finalized = False
         self._final_report = None
         self._final_files = []
+        self._final_sources = []
+        self._final_status = "complete"
+        # File-level locking for parallel edit safety
+        self._file_locks = {}
+        self._file_locks_lock = asyncio.Lock()
+        # Stagnation detection
+        self._recent_tool_calls = []
+
+    async def _get_file_lock(self, path):
+        async with self._file_locks_lock:
+            if path not in self._file_locks:
+                self._file_locks[path] = asyncio.Lock()
+            return self._file_locks[path]
 
     # ── Setup ────────────────────────────────────────────────────
     async def setup(self):
@@ -1874,10 +1940,56 @@ class Agent:
         if not p.exists():
             return f"Error: File not found: {path}"
         if p.is_dir():
-            return f"Error: {path} is a directory, not a file"
+            entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+            listing = []
+            for entry in list(entries)[:200]:
+                prefix = "DIR  " if entry.is_dir() else "FILE "
+                size = f" ({entry.stat().st_size:,} bytes)" if entry.is_file() else ""
+                listing.append(f"{prefix}{entry.name}{size}")
+            result = f"Note: {path} is a directory, not a file. Use list_dir instead.\n\n"
+            result += f"Directory: {p}\n{len(listing)} entries:\n" + "\n".join(listing)
+            return result
         try:
             data = p.read_bytes()
+
+            # Document parsing for common formats
+            ext = p.suffix.lower()
+            if ext in (".pdf", ".docx", ".xlsx", ".pptx", ".csv"):
+                try:
+                    from markitdown import MarkItDown
+                    md = MarkItDown()
+                    result = md.convert(str(p))
+                    text = result.text_content
+                    if text and text.strip():
+                        lines = text.splitlines()
+                        return f"[Document: {path} | {len(lines)} lines | {len(data)} bytes | format: {ext}]\n{text}"
+                except ImportError:
+                    pass
+                except Exception:
+                    pass
+                # Fallback for PDFs if markitdown fails
+                if ext == ".pdf":
+                    try:
+                        from pypdf import PdfReader
+                        reader = PdfReader(str(p))
+                        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+                        if text.strip():
+                            lines = text.splitlines()
+                            return f"[PDF: {path} | {len(reader.pages)} pages | {len(lines)} lines]\n{text}"
+                    except Exception:
+                        pass
+
             if is_binary_data(data):
+                ext = p.suffix.lower()
+                if ext in IMAGE_EXTENSIONS:
+                    info = {
+                        "path": str(p), "binary": True, "image": True,
+                        "size": len(data),
+                        "mime": mimetypes.guess_type(str(p))[0] or "image/png",
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "tip": "Use analyze_image to interpret this image.",
+                    }
+                    return json.dumps(info, indent=2)
                 info = {
                     "path": str(p),
                     "binary": True,
@@ -1887,12 +1999,17 @@ class Agent:
                 }
                 return json.dumps(info, indent=2)
             text = data.decode("utf-8", errors="replace")
+            total_lines = len(text.splitlines())
             if start_line is not None or end_line is not None:
                 lines = text.splitlines()
                 s = max((int(start_line) if start_line else 1) - 1, 0)
                 e = int(end_line) if end_line else len(lines)
                 numbered = [f"{idx}: {line}" for idx, line in enumerate(lines[s:e], start=s + 1)]
-                text = "\n".join(numbered)
+                header = f"[File: {path} | Lines {s+1}-{min(e, total_lines)} of {total_lines}]"
+                text = header + "\n" + "\n".join(numbered)
+            else:
+                header = f"[File: {path} | {total_lines} lines | {len(data)} bytes]"
+                text = header + "\n" + text
             return text
         except Exception as e:
             return f"Error reading {path}: {e}"
@@ -1900,22 +2017,26 @@ class Agent:
     async def _tool_write_file(self, path, content, mode=None, **kw):
         p = resolve_path(self.cwd, path)
         mode = mode or "overwrite"
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            before_hash = file_sha256(p)
-            op = "a" if mode == "append" else "w"
-            with p.open(op, encoding="utf-8") as f:
-                f.write(content)
-            after_hash = file_sha256(p)
-            return json.dumps({
-                "path": str(p),
-                "mode": mode,
-                "bytes_written": len(content.encode("utf-8")),
-                "before_sha256": before_hash,
-                "after_sha256": after_hash,
-            }, indent=2)
-        except Exception as e:
-            return f"Error writing {path}: {e}"
+        if mode == "create_only" and p.exists():
+            return f"Error: File already exists: {path}. Use mode='overwrite' to replace it."
+        lock = await self._get_file_lock(str(p))
+        async with lock:
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                before_hash = file_sha256(p)
+                op = "a" if mode == "append" else "w"
+                with p.open(op, encoding="utf-8") as f:
+                    f.write(content)
+                after_hash = file_sha256(p)
+                return json.dumps({
+                    "path": str(p),
+                    "mode": mode,
+                    "bytes_written": len(content.encode("utf-8")),
+                    "before_sha256": before_hash,
+                    "after_sha256": after_hash,
+                }, indent=2)
+            except Exception as e:
+                return f"Error writing {path}: {e}"
 
     async def _tool_glob(self, pattern, path=None, include_hidden=False, **kw):
         root = resolve_path(self.cwd, path or ".")
@@ -1928,47 +2049,94 @@ class Agent:
         files = sorted(set(files))
         if not files:
             return "No files matched."
-        return json.dumps({"root": str(root), "pattern": pattern, "matches": files}, indent=2)
+        total_size = 0
+        for f in files:
+            try:
+                total_size += Path(self.cwd, f).stat().st_size
+            except OSError:
+                pass
+        return json.dumps({
+            "root": str(root), "pattern": pattern,
+            "count": len(files), "total_size_bytes": total_size,
+            "matches": files
+        }, indent=2)
 
     async def _tool_edit_file(self, path, mode, patch=None, pattern=None,
-                              replacement=None, flags=None, count=None, **kw):
+                              replacement=None, flags=None, count=None,
+                              start_line=None, end_line=None, new_content=None,
+                              after_line=None, insert_content=None, **kw):
         p = resolve_path(self.cwd, path)
         if not p.exists():
             return f"Error: File not found: {path}"
-        try:
-            original = p.read_text(encoding="utf-8", errors="replace")
-            updated = original
+        lock = await self._get_file_lock(str(p))
+        async with lock:
+            try:
+                original = p.read_text(encoding="utf-8", errors="replace")
+                updated = original
 
-            if mode == "search_replace":
-                if not patch:
-                    return "Error: patch is required for search_replace mode"
-                updated = apply_search_replace_patch(original, patch)
-            elif mode == "regex":
-                if not pattern:
-                    return "Error: pattern is required for regex mode"
-                re_flags = parse_regex_flags(flags or "")
-                cnt = int(count) if count else 0
-                updated, n = re.subn(pattern, replacement or "", original, count=cnt, flags=re_flags)
-                if n == 0:
-                    return f"Error: Regex pattern not found in {path}"
-            elif mode == "unified_diff":
-                if not patch:
-                    return "Error: patch is required for unified_diff mode"
-                changed = apply_unified_patch(self.cwd, patch)
-                return json.dumps({"mode": "unified_diff", "changed_files": changed}, indent=2)
-            else:
-                return f"Error: Unknown edit mode '{mode}'. Use search_replace, regex, or unified_diff."
+                if mode == "search_replace":
+                    if not patch:
+                        return "Error: patch is required for search_replace mode"
+                    updated = apply_search_replace_patch(original, patch)
+                elif mode == "line_range":
+                    if start_line is None or end_line is None:
+                        return "Error: start_line and end_line are required for line_range mode"
+                    lines = original.splitlines(keepends=True)
+                    s = max(int(start_line) - 1, 0)
+                    e = min(int(end_line), len(lines))
+                    if s >= len(lines):
+                        return f"Error: start_line {start_line} exceeds file length ({len(lines)} lines)"
+                    if s > e:
+                        return f"Error: Invalid line range. start_line must be <= end_line."
+                    replacement_text = new_content if new_content is not None else ""
+                    replacement_lines = replacement_text.splitlines(keepends=True)
+                    if replacement_lines and not replacement_lines[-1].endswith("\n"):
+                        replacement_lines[-1] += "\n"
+                    updated = "".join(lines[:s] + replacement_lines + lines[e:])
+                elif mode == "insert":
+                    if insert_content is None:
+                        return "Error: insert_content is required for insert mode"
+                    if after_line is None:
+                        return "Error: after_line is required for insert mode (use 0 to prepend)"
+                    lines = original.splitlines(keepends=True)
+                    pos = min(int(after_line), len(lines))
+                    new_lines = insert_content.splitlines(keepends=True)
+                    if new_lines and not new_lines[-1].endswith("\n"):
+                        new_lines[-1] += "\n"
+                    updated = "".join(lines[:pos] + new_lines + lines[pos:])
+                elif mode == "regex":
+                    if not pattern:
+                        return "Error: pattern is required for regex mode"
+                    re_flags = parse_regex_flags(flags or "")
+                    cnt = int(count) if count else 0
+                    updated, n = re.subn(pattern, replacement or "", original, count=cnt, flags=re_flags)
+                    if n == 0:
+                        return f"Error: Regex pattern not found in {path}"
+                elif mode == "unified_diff":
+                    if not patch:
+                        return "Error: patch is required for unified_diff mode"
+                    changed = apply_unified_patch(self.cwd, patch)
+                    return json.dumps({"mode": "unified_diff", "changed_files": changed}, indent=2)
+                else:
+                    return f"Error: Unknown edit mode '{mode}'. Use search_replace, line_range, insert, regex, or unified_diff."
 
-            if updated == original:
-                return "Warning: No changes were applied."
-            p.write_text(updated, encoding="utf-8")
-            diff = "\n".join(difflib.unified_diff(
-                original.splitlines(), updated.splitlines(),
-                fromfile=str(p), tofile=str(p), lineterm="",
-            ))
-            return diff or "Edit applied (no visible diff)."
-        except Exception as e:
-            return f"Error editing {path}: {e}"
+                if updated == original:
+                    return "Warning: No changes were applied."
+                p.write_text(updated, encoding="utf-8")
+                diff = "\n".join(difflib.unified_diff(
+                    original.splitlines(), updated.splitlines(),
+                    fromfile=str(p), tofile=str(p), lineterm="",
+                ))
+                return diff or "Edit applied (no visible diff)."
+            except RuntimeError as e:
+                err_msg = str(e)
+                if "did not match" in err_msg and "Nearest lines" not in err_msg:
+                    lines = original.splitlines()
+                    preview = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines[:30]))
+                    err_msg += f"\n\nFirst 30 lines of {path} for reference:\n{preview}"
+                return f"Error editing {path}: {err_msg}"
+            except Exception as e:
+                return f"Error editing {path}: {e}"
 
     async def _tool_search_file(self, name_glob=None, name_regex=None,
                                  content_query=None, content_is_regex=False,
@@ -2018,17 +2186,25 @@ class Agent:
 
         return json.dumps(results, ensure_ascii=False, indent=2)
 
-    async def _tool_run_command(self, command, cwd=None, timeout=None, env=None, **kw):
+    async def _tool_run_command(self, command, cwd=None, timeout=None, stdin=None, env=None, **kw):
         timeout = timeout or DEFAULT_CMD_TIMEOUT
         run_cwd = resolve_path(self.cwd, cwd or ".")
         process_env = os.environ.copy()
+        # Anti-hang environment variables
+        process_env.update({
+            "DEBIAN_FRONTEND": "noninteractive",
+            "CI": "1",
+            "PYTHONUNBUFFERED": "1",
+        })
         if env:
             for k, v in env.items():
                 process_env[str(k)] = str(v)
+        stdin_data = stdin.encode("utf-8") if stdin else None
         start = time.time()
         try:
             proc = await asyncio.create_subprocess_shell(
-                command,
+                command + (" < /dev/null" if not stdin else ""),
+                stdin=asyncio.subprocess.PIPE if stdin_data else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(run_cwd),
@@ -2037,7 +2213,9 @@ class Agent:
             )
             timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=stdin_data), timeout=timeout
+                )
             except asyncio.TimeoutError:
                 timed_out = True
                 proc.kill()
@@ -2055,14 +2233,18 @@ class Agent:
         except Exception as e:
             return f"Command error: {e}"
 
-    async def _tool_search_web(self, query, num_results=None, **kw):
+    async def _tool_search_web(self, query, num_results=None, categories=None,
+                               time_range=None, **kw):
         num_results = num_results or 10
         if not self.searxng.url:
             return "Error: SearXNG unavailable. Web search is disabled this session."
         try:
+            params = {"q": query, "format": "json", "categories": categories or "general"}
+            if time_range:
+                params["time_range"] = time_range
             resp = await self.http.get(
                 f"{self.searxng.url}/search",
-                params={"q": query, "format": "json", "categories": "general"},
+                params=params,
                 timeout=20,
             )
             data = resp.json()
@@ -2075,16 +2257,42 @@ class Agent:
                     "snippet": r.get("content", "")[:500],
                     "engine": r.get("engine", ""),
                 })
-            return json.dumps(out, ensure_ascii=False, indent=2)
+            return f"[UNTRUSTED SEARCH RESULTS — query: {query}]\n\n{json.dumps(out, ensure_ascii=False, indent=2)}"
         except Exception as e:
             return f"Search error: {e}"
 
     async def _tool_fetch_page(self, url, mode=None, screenshot_region=None,
+                                extract_selector=None, wait_for=None,
                                 timeout_ms=None, **kw):
         mode = mode or "markdown"
         screenshot_region = screenshot_region or "above"
         timeout_ms = timeout_ms or 45000
-        return await self.browser.fetch(url, mode, screenshot_region, timeout_ms)
+
+        # Lightweight text mode — no browser needed
+        if mode == "text":
+            try:
+                resp = await self.http.get(url, timeout=timeout_ms/1000, follow_redirects=True)
+                content_type = resp.headers.get("content-type", "")
+                if "json" in content_type:
+                    return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\nURL: {url}\n\n{resp.text}"
+                from bs4 import BeautifulSoup
+                from html_to_markdown import convert as to_md
+                soup = BeautifulSoup(resp.text, "lxml")
+                for tag in soup(["script", "style", "nav", "footer", "header",
+                                 "aside", "iframe", "noscript", "svg"]):
+                    tag.decompose()
+                body = soup.body.decode_contents() if soup.body else str(soup)
+                md = to_md(body)
+                md = re.sub(r"\n{3,}", "\n\n", md).strip()
+                title = soup.title.string if soup.title else url
+                return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n# {title}\n\nURL: {url}\n\n{md}"
+            except Exception as e:
+                return f"Error fetching {url}: {e}"
+
+        result = await self.browser.fetch(url, mode, screenshot_region, timeout_ms,
+                                          extract_selector=extract_selector,
+                                          wait_for=wait_for)
+        return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
 
     async def _tool_plan_create(self, items, **kw):
         return self.plan.create(items)
@@ -2096,12 +2304,14 @@ class Agent:
         return self.plan.complete(item_id)
 
     async def _tool_think(self, thought, **kw):
-        return "Thought recorded."
+        return f"Thought recorded:\n{thought}"
 
     async def _tool_oracle(self, question, include_context=False, **kw):
         msgs = []
         system = (
-            "You are an external oracle assisting an autonomous coding agent. "
+            "You are an external oracle assisting a general-purpose autonomous AI agent. "
+            "It handles research, analysis, report generation, data processing, structured "
+            "data extraction, and automation — not only code. "
             "Answer rigorously. If context is provided, use it. Be concrete and actionable."
         )
         if include_context:
@@ -2128,7 +2338,6 @@ class Agent:
                     "messages": [{"role": "system", "content": system}] + msgs,
                     "temperature": 0.2,
                     "max_tokens": 16384,
-                    "plugins": [{"id": "web"}],
                     "reasoning": {"effort": "xhigh"},
                 },
                 timeout=300,
@@ -2151,11 +2360,245 @@ class Agent:
         except Exception as e:
             return f"Oracle error: {e}"
 
-    async def _tool_finalize(self, report="Task completed.", files=None, **kw):
+    async def _tool_finalize(self, report="Task completed.", files=None,
+                              sources=None, status=None, **kw):
         self._finalized = True
         self._final_report = report
         self._final_files = files or []
+        self._final_sources = sources or []
+        self._final_status = status or "complete"
         return report
+
+    # ── New tool implementations ───────────────────────────────
+    async def _tool_list_dir(self, path=None, depth=None, include_hidden=False, **kw):
+        root = resolve_path(self.cwd, path or ".")
+        if not root.exists():
+            return f"Error: Path not found: {path}"
+        if not root.is_dir():
+            return f"Error: Not a directory: {path}"
+        depth = min(int(depth or 1), 5)
+        entries = []
+        def walk(d, current_depth):
+            if current_depth > depth:
+                return
+            try:
+                items = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except PermissionError:
+                return
+            for item in items:
+                if not include_hidden and item.name.startswith('.'):
+                    continue
+                rel = os.path.relpath(str(item), str(self.cwd))
+                info = {"path": rel, "type": "dir" if item.is_dir() else "file"}
+                if item.is_file():
+                    try:
+                        info["size"] = item.stat().st_size
+                    except OSError:
+                        info["size"] = -1
+                entries.append(info)
+                if item.is_dir() and current_depth < depth:
+                    walk(item, current_depth + 1)
+        walk(root, 1)
+        return json.dumps({"directory": str(root), "depth": depth,
+                           "count": len(entries), "entries": entries}, indent=2)
+
+    async def _tool_http_request(self, url, method="GET", headers=None, body=None,
+                                  content_type=None, timeout=30, save_to=None, **kw):
+        req_headers = dict(headers or {})
+        if content_type == "json":
+            req_headers.setdefault("Content-Type", "application/json")
+        elif content_type == "form":
+            req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            resp = await self.http.request(
+                method=method.upper(),
+                url=url,
+                headers=req_headers,
+                content=body.encode() if body else None,
+                timeout=timeout,
+            )
+            if save_to:
+                p = resolve_path(self.cwd, save_to)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(resp.content)
+                return json.dumps({
+                    "url": str(resp.url), "status": resp.status_code,
+                    "saved_to": str(p), "size": len(resp.content),
+                }, indent=2)
+            body_text = resp.text
+            truncated = False
+            if len(body_text) > 100_000:
+                body_text = body_text[:100_000]
+                truncated = True
+            return json.dumps({
+                "url": str(resp.url),
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": body_text,
+                "truncated": truncated,
+            }, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return f"HTTP request error: {e}"
+
+    async def _tool_analyze_image(self, source, question=None, **kw):
+        question = question or "Describe this image in detail, including all text, data, numbers, and visual elements."
+        try:
+            if source.startswith("http://") or source.startswith("https://"):
+                image_part = {"type": "image_url", "image_url": {"url": source}}
+            else:
+                p = resolve_path(self.cwd, source)
+                if not p.exists():
+                    return f"Error: Image not found: {source}"
+                data = p.read_bytes()
+                if len(data) > MAX_INLINE_BYTES:
+                    return f"Error: Image too large ({len(data):,} bytes, max {MAX_INLINE_BYTES:,})."
+                mime = mimetypes.guess_type(str(p))[0] or "image/png"
+                b64 = base64.b64encode(data).decode()
+                image_part = {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                }
+            resp = await self.http.post(
+                OPENROUTER_URL,
+                headers=self.headers,
+                json={
+                    "model": SONNET,
+                    "messages": [{
+                        "role": "user",
+                        "content": [image_part, {"type": "text", "text": question}],
+                    }],
+                    "max_tokens": 4096,
+                    "temperature": 0.1,
+                },
+                timeout=120,
+            )
+            result = resp.json()
+            rid = result.get("id")
+            if rid:
+                await self.cost_tracker.track(rid, "sonnet")
+            if "error" in result:
+                err = result["error"]
+                return f"Vision error: {err.get('message', err) if isinstance(err, dict) else err}"
+            content = result["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", "") if isinstance(p, dict) and p.get("type") == "text"
+                    else str(p) if isinstance(p, str) else ""
+                    for p in content
+                ).strip()
+            return content
+        except Exception as e:
+            return f"Image analysis error: {e}"
+
+    async def _tool_notes_add(self, content, **kw):
+        return self.notes.add(content)
+
+    async def _tool_notes_read(self, **kw):
+        return self.notes.read()
+
+    async def _tool_notes_clear(self, **kw):
+        return self.notes.clear()
+
+    async def _tool_batch_read(self, paths, max_lines_per_file=None, **kw):
+        results = {}
+        for path_str in paths:
+            p = resolve_path(self.cwd, path_str)
+            if not p.exists():
+                results[path_str] = {"error": "File not found"}
+                continue
+            if p.is_dir():
+                results[path_str] = {"error": "Is a directory"}
+                continue
+            try:
+                data = p.read_bytes()
+                if is_binary_data(data):
+                    results[path_str] = {"binary": True, "size": len(data)}
+                else:
+                    text = data.decode("utf-8", errors="replace")
+                    total_lines = text.count('\n') + 1
+                    if max_lines_per_file:
+                        lines = text.splitlines()
+                        if len(lines) > max_lines_per_file:
+                            text = "\n".join(lines[:max_lines_per_file]) + \
+                                   f"\n[…{len(lines) - max_lines_per_file} more lines]"
+                    results[path_str] = {"content": text, "size": len(data), "lines": total_lines}
+            except Exception as e:
+                results[path_str] = {"error": str(e)}
+        return json.dumps(results, ensure_ascii=False, indent=2)
+
+    async def _tool_plan_update(self, add_items=None, remove_ids=None, **kw):
+        result_parts = []
+        if remove_ids:
+            result_parts.append(self.plan.remove_items(remove_ids))
+        if add_items:
+            result_parts.append(self.plan.add_items(add_items))
+        if not result_parts:
+            return "No changes specified. Provide add_items and/or remove_ids."
+        return "\n".join(result_parts)
+
+    async def _tool_delegate(self, task, input, output_format=None, **kw):
+        fmt_instruction = f"\n\nReturn your output as {output_format}." if output_format else ""
+        try:
+            resp = await self.http.post(
+                OPENROUTER_URL,
+                headers=self.headers,
+                json={
+                    "model": SONNET,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a focused sub-agent performing a specific task. "
+                                "Follow the instruction exactly. Be concise and precise. "
+                                "Output only what was requested — no preamble, no explanation "
+                                "unless the task asks for it." + fmt_instruction
+                            ),
+                        },
+                        {"role": "user", "content": f"## Task\n{task}\n\n## Input\n{input}"},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 8192,
+                },
+                timeout=120,
+            )
+            result = resp.json()
+            rid = result.get("id")
+            if rid:
+                await self.cost_tracker.track(rid, "delegate")
+            if "error" in result:
+                err = result["error"]
+                return f"Delegate error: {err.get('message', err) if isinstance(err, dict) else err}"
+            content = result["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", "") if isinstance(p, dict) and p.get("type") == "text"
+                    else str(p) if isinstance(p, str) else ""
+                    for p in content
+                ).strip()
+            return content
+        except Exception as e:
+            return f"Delegate error: {e}"
+
+    async def _tool_diff_files(self, path_a, path_b, context_lines=3, **kw):
+        a = resolve_path(self.cwd, path_a)
+        b = resolve_path(self.cwd, path_b)
+        if not a.exists():
+            return f"Error: File not found: {path_a}"
+        if not b.exists():
+            return f"Error: File not found: {path_b}"
+        try:
+            a_lines = a.read_text(encoding="utf-8", errors="replace").splitlines()
+            b_lines = b.read_text(encoding="utf-8", errors="replace").splitlines()
+            diff = "\n".join(difflib.unified_diff(
+                a_lines, b_lines,
+                fromfile=str(a), tofile=str(b),
+                lineterm="", n=context_lines,
+            ))
+            if not diff:
+                return "Files are identical."
+            return diff
+        except Exception as e:
+            return f"Error comparing files: {e}"
 
     # ── Main loop ────────────────────────────────────────────────
     async def run(self, prompt, max_loops=MAX_LOOPS, resume_messages=None):
