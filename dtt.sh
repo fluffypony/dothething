@@ -3013,6 +3013,20 @@ class Agent:
 
     async def _tool_finalize(self, report="Task completed.", files=None,
                               sources=None, status=None, **kw):
+        # Pre-finalize validation: check plan completion
+        if self.plan.items:
+            remaining = sum(1 for i in self.plan.items if not i.get("done"))
+            total = len(self.plan.items)
+            if total > 0 and remaining > total * 0.3 and (status or "complete") == "complete":
+                return (
+                    f"WARNING: {remaining}/{total} plan items are still incomplete. "
+                    f"You should not finalize as 'complete' yet. Options:\n"
+                    f"1. Continue working on remaining items\n"
+                    f"2. Use plan_update to mark items as not applicable\n"
+                    f"3. Call finalize with status='partial' and explain what's missing\n"
+                    f"Review with plan_remaining, then decide."
+                )
+
         self._finalized = True
         self._final_report = report
         self._final_files = files or []
@@ -3620,6 +3634,93 @@ class Agent:
             f"Successful: {len(items) - errors[0]}, Errors: {errors[0]}"
         )
 
+    # ── Context compaction ────────────────────────────────────────
+    async def _maybe_compact_context(self):
+        """Compact conversation history when context grows too large."""
+        total_chars = sum(len(json.dumps(m, default=str)) for m in self.messages)
+        estimated_tokens = total_chars // 4
+        msg_count = len(self.messages)
+
+        if estimated_tokens < 700_000 and msg_count < 500:
+            return
+        if msg_count < 15:
+            return
+
+        system_msg = self.messages[0]
+        original_user_msg = self.messages[1]
+        recent_messages = self.messages[-10:]
+        middle_messages = self.messages[2:-10]
+
+        if not middle_messages:
+            return
+
+        summary_text = json.dumps(middle_messages, ensure_ascii=False, default=str)
+        if len(summary_text) > 280_000:
+            summary_text = summary_text[:280_000] + "\n[…truncated]"
+
+        try:
+            resp = await self.http.post(
+                OPENROUTER_URL,
+                headers=self.headers,
+                json={
+                    "model": SONNET,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Summarize this agent conversation history. Preserve ALL of:\n"
+                                "- File paths created/modified/read\n"
+                                "- URLs found and fetched\n"
+                                "- Key data extracted and decisions made\n"
+                                "- Current task status and what remains to be done\n"
+                                "- Any counts, metrics, or acceptance criteria\n"
+                                "- Errors encountered and how they were resolved\n"
+                                "- All search queries and their key findings\n"
+                                "Be comprehensive. This summary replaces the original history."
+                            ),
+                        },
+                        {"role": "user", "content": summary_text},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 8192,
+                },
+                timeout=120,
+            )
+            result = resp.json()
+            rid = result.get("id")
+            if rid:
+                await self.cost_tracker.track(rid, "compaction")
+            if "error" in result:
+                return  # Don't compact if summarization fails
+            summary = result["choices"][0]["message"]["content"]
+            if isinstance(summary, list):
+                summary = "\n".join(
+                    x.get("text", "") if isinstance(x, dict) else str(x)
+                    for x in summary
+                )
+
+            self.messages = [
+                system_msg,
+                original_user_msg,
+                {
+                    "role": "user",
+                    "content": (
+                        f"[System] Context was compacted to stay within limits. "
+                        f"{len(middle_messages)} messages were summarized. "
+                        f"Use notes_read and plan_remaining to recover detailed state.\n\n"
+                        f"## Conversation Summary\n{summary}"
+                    ),
+                },
+            ] + recent_messages
+
+            print(
+                f"  Context compacted: {msg_count} -> {len(self.messages)} messages",
+                file=sys.stderr,
+            )
+
+        except Exception as e:
+            print(f"  ⚠ Context compaction failed: {e}", file=sys.stderr)
+
     # ── Main loop ────────────────────────────────────────────────
     async def run(self, prompt, max_loops=MAX_LOOPS, resume_messages=None):
         import platform as plat
@@ -3688,6 +3789,7 @@ class Agent:
 
         nudge_count = 0
         for loop in range(max_loops):
+            await self._maybe_compact_context()
             self.spinner.start(f"Thinking (turn {loop + 1})…")
             result = await self._call_model()
             self.spinner.stop()
@@ -3821,6 +3923,53 @@ class Agent:
                             "[System] WARNING: You appear to be repeating the same tool calls. "
                             "Use think to analyze why you're stuck, then try a fundamentally "
                             "different approach. If the task is complete, call finalize."
+                        ),
+                    })
+
+            # Serial-work detector (same tool pattern 10+ times = manual grinding)
+            if tool_calls:
+                turn_fingerprint = tuple(sorted(
+                    tc["function"]["name"] for tc in tool_calls
+                ))
+                self._tool_call_patterns.append(turn_fingerprint)
+                if len(self._tool_call_patterns) >= 10:
+                    last_ten = self._tool_call_patterns[-10:]
+                    unique_patterns = set(last_ten)
+                    if len(unique_patterns) <= 2:
+                        research_tools = {"search_web", "fetch_page", "http_request"}
+                        all_names = set()
+                        for pat in last_ten:
+                            all_names.update(pat)
+                        if all_names & research_tools:
+                            self.messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System] WARNING: You appear to be manually grinding through "
+                                    "items one-by-one using repeated tool calls. This is inefficient "
+                                    "and will cause you to give up or hallucinate remaining data. "
+                                    "STOP and switch to a batch approach:\n"
+                                    "- Use run_code to write a parallel processing script\n"
+                                    "- Use batch_process to fan out work to Sonnet in parallel\n"
+                                    "- Use analyze_data to process large result files\n"
+                                    "Do NOT continue one-by-one processing."
+                                ),
+                            })
+                            self._tool_call_patterns.clear()
+
+            # Progress check nudges every 20 turns
+            if loop > 0 and loop % 20 == 0 and not self._finalized:
+                if self.plan.items and len(self.plan.items) > 10:
+                    done = sum(1 for i in self.plan.items if i.get("done"))
+                    total = len(self.plan.items)
+                    remaining = total - done
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[System] Progress check — turn {loop + 1}/{max_loops}. "
+                            f"Plan: {done}/{total} items done, {remaining} remaining. "
+                            "If processing items one-by-one and many remain, switch to "
+                            "run_code/batch_process for parallel processing. "
+                            "Do NOT finalize early by guessing remaining data."
                         ),
                     })
 
