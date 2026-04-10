@@ -785,6 +785,217 @@ class Notes:
         return f"Cleared {n} notes."
 
 # ═══════════════════════════════════════════════════════════════════
+# SkillManager — loads skills from ~/.dtt/skills/
+# ═══════════════════════════════════════════════════════════════════
+class SkillManager:
+    """Loads skills from ~/.dtt/skills/ following Claude Code SKILL.md conventions."""
+
+    SKILL_DIR = Path.home() / ".dtt" / "skills"
+
+    def __init__(self):
+        self.skills = {}  # name -> {description, path, content, frontmatter}
+        self._load_skills()
+
+    def _load_skills(self):
+        if not self.SKILL_DIR.exists():
+            return
+        for md_file in self.SKILL_DIR.rglob("*.md"):
+            try:
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+                name, desc, frontmatter = self._parse_skill(text, md_file)
+                if name:
+                    self.skills[name] = {
+                        "description": desc,
+                        "path": str(md_file),
+                        "content": text,
+                        "frontmatter": frontmatter or {},
+                    }
+            except Exception:
+                continue
+
+    def _parse_skill(self, text, path):
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    meta = yaml.safe_load(parts[1])
+                    if isinstance(meta, dict) and meta.get("name"):
+                        return (
+                            meta["name"],
+                            meta.get("description", path.stem),
+                            meta,
+                        )
+                except Exception:
+                    pass
+        h_match = re.match(r'^#\s+(?:[Ss]kill:\s*)?(.+)', text)
+        if h_match:
+            name = h_match.group(1).strip().lower().replace(" ", "_")
+            lines = text.split("\n\n")
+            desc = lines[1].strip()[:200] if len(lines) > 1 else name
+            return name, desc, None
+        return path.stem, f"Skill from {path.name}", None
+
+    def list_skills(self):
+        """Return {name: description} for skills that are model-invocable."""
+        return {
+            n: s["description"]
+            for n, s in self.skills.items()
+            if not s["frontmatter"].get("disable-model-invocation", False)
+        }
+
+    def get_skill(self, name):
+        return self.skills.get(name)
+
+# ═══════════════════════════════════════════════════════════════════
+# MCPManager — manages MCP server connections
+# ═══════════════════════════════════════════════════════════════════
+class MCPManager:
+    """Manages MCP server connections using ~/.dtt/mcp.json (Claude Code format)."""
+
+    CONFIG_PATH = Path.home() / ".dtt" / "mcp.json"
+
+    def __init__(self):
+        self.servers = {}      # name -> {session, tools_raw, config}
+        self._exit_stack = None
+        self._raw_config = {}
+
+    def _expand_env(self, value):
+        """Expand ${VAR} and ${VAR:-default} in config strings."""
+        if not isinstance(value, str):
+            return value
+        import re as _re
+        def _replacer(m):
+            var = m.group(1) or m.group(2)
+            default = m.group(3)
+            return os.environ.get(var, default if default is not None else "")
+        return _re.sub(r'\$\{(\w+)\}|\$\{(\w+):-([^}]*)\}', _replacer, value)
+
+    def _expand_env_dict(self, d):
+        if not d:
+            return {}
+        return {k: self._expand_env(v) for k, v in d.items()}
+
+    async def start(self, spinner=None):
+        if not HAS_MCP:
+            return
+        if not self.CONFIG_PATH.exists():
+            return
+        try:
+            self._raw_config = json.loads(self.CONFIG_PATH.read_text())
+        except Exception:
+            return
+
+        mcp_servers = self._raw_config.get("mcpServers", {})
+        if not mcp_servers:
+            return
+
+        self._exit_stack = contextlib.AsyncExitStack()
+        await self._exit_stack.__aenter__()
+
+        for name, srv_config in mcp_servers.items():
+            try:
+                if spinner:
+                    spinner.update(f"MCP: connecting {name}...")
+                cmd = srv_config.get("command", "")
+                args = srv_config.get("args", [])
+                raw_env = srv_config.get("env", {})
+                expanded_env = self._expand_env_dict(raw_env)
+                env = {**os.environ, **expanded_env}
+
+                params = StdioServerParameters(
+                    command=cmd,
+                    args=args,
+                    env=env,
+                )
+                transport = await self._exit_stack.enter_async_context(
+                    stdio_client(params)
+                )
+                read_stream, write_stream = transport
+                session = await self._exit_stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
+                )
+                await session.initialize()
+                tools_resp = await session.list_tools()
+
+                self.servers[name] = {
+                    "session": session,
+                    "tools_raw": {t.name: t for t in tools_resp.tools},
+                    "config": srv_config,
+                }
+                if spinner:
+                    spinner.update(
+                        f"MCP: {name} connected ({len(tools_resp.tools)} tools)"
+                    )
+            except Exception as e:
+                print(
+                    f"  ⚠ MCP server '{name}' failed: {e}", file=sys.stderr
+                )
+
+    def get_tool_definitions(self):
+        """Return OpenAI-format tool definitions for all MCP tools."""
+        defs = []
+        for srv_name, srv in self.servers.items():
+            for tool_name, tool in srv["tools_raw"].items():
+                schema = dict(tool.inputSchema) if hasattr(tool, "inputSchema") and tool.inputSchema else {"type": "object", "properties": {}}
+                props = dict(schema.get("properties", {}))
+                props["result_mode"] = RESULT_MODE_PROP
+                req = list(schema.get("required", [])) + ["result_mode"]
+                defs.append({
+                    "type": "function",
+                    "function": {
+                        "name": f"mcp__{srv_name}__{tool_name}",
+                        "description": f"[MCP:{srv_name}] {tool.description or tool_name}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": props,
+                            "required": req,
+                        },
+                    },
+                })
+        return defs
+
+    async def call_tool(self, srv_name, tool_name, arguments):
+        srv = self.servers.get(srv_name)
+        if not srv:
+            return f"Error: MCP server '{srv_name}' not connected"
+        args_clean = {k: v for k, v in arguments.items() if k != "result_mode"}
+        try:
+            result = await srv["session"].call_tool(tool_name, arguments=args_clean)
+            texts = []
+            for item in (result.content or []):
+                if hasattr(item, "text"):
+                    texts.append(item.text)
+                else:
+                    texts.append(str(item))
+            return "\n".join(texts) if texts else str(result)
+        except Exception as e:
+            return f"MCP tool call error: {e}"
+
+    def get_prompt_section(self):
+        """Return a prompt section describing available MCP servers and tools."""
+        if not self.servers:
+            return ""
+        lines = ["<mcp_servers>", "The following MCP servers are connected:"]
+        for srv_name, srv in self.servers.items():
+            lines.append(f"\n## {srv_name}")
+            for t_name, t in srv["tools_raw"].items():
+                full_name = f"mcp__{srv_name}__{t_name}"
+                desc = (t.description or t_name)[:120]
+                lines.append(f"  - {full_name}: {desc}")
+        lines.append(
+            "\nCall MCP tools like any other tool using their full prefixed name."
+        )
+        lines.append("</mcp_servers>")
+        return "\n".join(lines)
+
+    async def stop(self):
+        if self._exit_stack:
+            try:
+                await self._exit_stack.aclose()
+            except Exception:
+                pass
+
+# ═══════════════════════════════════════════════════════════════════
 # Utility functions
 # ═══════════════════════════════════════════════════════════════════
 def resolve_path(cwd, path_str):
