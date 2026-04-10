@@ -2667,7 +2667,7 @@ class Agent:
 
             # Extract reasoning blocks for continuity across turns
             _reasoning = {}
-            for _rkey in ("reasoning", "reasoning_content"):
+            for _rkey in ("reasoning", "reasoning_content", "reasoning_details"):
                 if msg.get(_rkey):
                     _reasoning[_rkey] = msg[_rkey]
 
