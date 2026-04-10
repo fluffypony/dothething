@@ -39,7 +39,7 @@ dtt_update() (
     $newer || return 0
 
     echo "▸ Updating dothething: $DTT_VERSION → $remote" >&2
-    tmp=$(mktemp)
+    tmp=$(mktemp "$(dirname "$DTT_SELF")/.dtt_update.XXXXXX")
     if curl -sfL --max-time 30 "https://raw.githubusercontent.com/fluffypony/dothething/main/dtt.sh" \
          -o "$tmp" && [ -s "$tmp" ] && head -1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
         chmod +x "$tmp"
