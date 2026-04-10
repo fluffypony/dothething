@@ -1,0 +1,753 @@
+<html lang="en" vid="0"><head vid="1">
+<meta charset="UTF-8" vid="2">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" vid="3">
+<title vid="4">dothething (DTT) - Autonomous AI Agent</title>
+
+<style vid="5">
+    :root {
+        --bg-color: #18191b;
+        --text-primary: #f2f2f7;
+        --text-secondary: #a1a1aa;
+        --text-muted: #6b7280;
+        --accent-lavender: #9b8fff;
+        --accent-white: #e4e4e7;
+        --line-color: rgba(255, 255, 255, 0.1);
+        --line-style: 1px dotted var(--line-color);
+        --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", Consolas, monospace;
+    }
+
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        background-color: var(--bg-color);
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        line-height: 1.5;
+        font-size: 14px;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        overflow-x: hidden;
+    }
+
+    #noise-canvas {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        z-index: -1;
+        pointer-events: none;
+    }
+
+    .frame {
+        max-width: 1600px;
+        margin: 0 auto;
+        padding: 3vw 4vw;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+    }
+
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 2rem;
+    }
+
+    .col-1 { grid-column: span 1; }
+    .col-2 { grid-column: span 2; }
+    .col-3 { grid-column: span 3; }
+    .col-4 { grid-column: span 4; }
+    .col-5 { grid-column: span 5; }
+    .col-6 { grid-column: span 6; }
+    .col-7 { grid-column: span 7; }
+    .col-8 { grid-column: span 8; }
+    .col-9 { grid-column: span 9; }
+    .col-10 { grid-column: span 10; }
+    .col-11 { grid-column: span 11; }
+    .col-12 { grid-column: span 12; }
+
+    h1 {
+        font-size: clamp(2.5rem, 4vw, 4.5rem);
+        font-weight: 500;
+        letter-spacing: -0.04em;
+        line-height: 1.05;
+        margin-bottom: 1.5rem;
+    }
+
+    .meta-heading {
+        font-family: var(--font-sans);
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-secondary);
+        margin-bottom: 1rem;
+        font-weight: 600;
+    }
+
+    p {
+        color: var(--text-secondary);
+        margin-bottom: 1rem;
+        font-size: 0.95rem;
+        line-height: 1.6;
+    }
+
+    .text-light { color: var(--text-primary); }
+
+    header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        border-bottom: var(--line-style);
+        padding-bottom: 2rem;
+        margin-bottom: 4rem;
+    }
+
+    .logo-area {
+        font-weight: 700;
+        font-size: 1.2rem;
+        letter-spacing: -0.02em;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .hero-section {
+        margin-bottom: 6rem;
+    }
+
+    .hero-text-block {
+        position: relative;
+    }
+
+    .hero-icon-container {
+        position: absolute;
+        left: -40px;
+        top: 8px;
+    }
+    
+    .hero-icon-container svg {
+        width: 20px;
+        height: 20px;
+        opacity: 0.8;
+        color: var(--accent-lavender);
+    }
+
+    .one-liner {
+        font-size: 1.25rem;
+        color: var(--text-secondary);
+        max-width: 90%;
+        line-height: 1.4;
+        letter-spacing: -0.01em;
+    }
+
+    .visual-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0; 
+        height: 100%;
+        position: relative;
+    }
+
+    .visual-grid::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        border-left: var(--line-style);
+    }
+
+    .visual-col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding-top: 0.5rem;
+    }
+
+    .visual-meta {
+        text-align: center;
+        font-size: 0.7rem;
+        color: var(--text-secondary);
+        margin-bottom: 2rem;
+        line-height: 1.4;
+    }
+    
+    .visual-meta strong {
+        color: var(--text-primary);
+        font-size: 1.1rem;
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.2rem;
+    }
+
+    .orb-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        position: relative;
+    }
+
+    .orb-stack::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        border-left: var(--line-style);
+        z-index: 0;
+    }
+
+    .orb {
+        width: 90px;
+        height: 90px;
+        border-radius: 50%;
+        position: relative;
+        z-index: 1;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .orb-dim-1 { opacity: 0.5; filter: blur(1px); transform: scale(0.9); }
+    .orb-dim-2 { opacity: 0.25; filter: blur(2px); transform: scale(0.8); }
+
+    .install-block {
+        border-top: var(--line-style);
+        border-bottom: var(--line-style);
+        padding: 2rem 0;
+        margin-bottom: 5rem;
+    }
+
+    .code-container {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 1.5rem;
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+    }
+
+    .code-container code {
+        color: var(--accent-lavender);
+        word-break: break-all;
+    }
+
+    .copy-btn {
+        background: transparent;
+        color: var(--text-primary);
+        border: 1px solid var(--line-color);
+        padding: 0.5rem 1rem;
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        cursor: pointer;
+        transition: all 0.2s;
+        text-transform: uppercase;
+        margin-left: 2rem;
+        flex-shrink: 0;
+    }
+
+    .copy-btn:hover {
+        background: var(--accent-lavender);
+        color: var(--bg-color);
+        border-color: var(--accent-lavender);
+    }
+
+    .req-note {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        margin-top: 1rem;
+    }
+
+    .section-block {
+        margin-bottom: 5rem;
+        position: relative;
+    }
+
+    .col-divider {
+        border-right: var(--line-style);
+        padding-right: 2rem;
+    }
+    
+    .col-padded {
+        padding-left: 2rem;
+    }
+
+    .feature-list {
+        list-style: none;
+    }
+    
+    .feature-list li {
+        margin-bottom: 1.5rem;
+        padding-left: 1.5rem;
+        position: relative;
+    }
+
+    .feature-list li::before {
+        content: '→';
+        position: absolute;
+        left: 0;
+        top: 0;
+        color: var(--accent-lavender);
+        font-family: var(--font-mono);
+    }
+    
+    .feature-list strong {
+        color: var(--text-primary);
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.2rem;
+    }
+
+    .data-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+    }
+
+    .data-table th, .data-table td {
+        padding: 1rem 0;
+        border-bottom: var(--line-style);
+        text-align: left;
+        vertical-align: top;
+    }
+
+    .data-table th {
+        color: var(--text-muted);
+        font-weight: normal;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 0.7rem;
+    }
+
+    .data-table td.col-key {
+        color: var(--text-primary);
+        width: 25%;
+    }
+
+    .data-table td.col-val {
+        color: var(--text-secondary);
+        font-family: var(--font-sans);
+        font-size: 0.85rem;
+    }
+
+    .tool-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        background: var(--line-color);
+        border: 1px solid var(--line-color);
+    }
+
+    .tool-item {
+        background: var(--bg-color);
+        padding: 1rem;
+    }
+
+    .tool-name {
+        font-family: var(--font-mono);
+        color: var(--accent-lavender);
+        font-size: 0.8rem;
+        margin-bottom: 0.5rem;
+        display: block;
+    }
+
+    .tool-desc {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        line-height: 1.4;
+    }
+
+    footer {
+        margin-top: auto;
+        padding-top: 4rem;
+        border-top: var(--line-style);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        color: var(--text-muted);
+    }
+
+    .footer-main {
+        text-align: center;
+        flex-grow: 1;
+        font-size: 0.9rem;
+        color: var(--text-primary);
+    }
+
+    .footer-main span {
+        display: block;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        margin-top: 0.2rem;
+    }
+
+    a {
+        color: inherit;
+        text-decoration: none;
+        border-bottom: 1px solid rgba(255,255,255,0.2);
+        transition: all 0.2s;
+    }
+    
+    a:hover {
+        border-bottom-color: var(--accent-lavender);
+        color: var(--accent-lavender);
+    }
+
+    .svg-defs {
+        position: absolute;
+        width: 0;
+        height: 0;
+    }
+
+    @media (max-width: 1024px) {
+        .col-divider { border-right: none; padding-right: 0; }
+        .col-padded { padding-left: 0; }
+        .hero-section .col-5, .hero-section .col-7 { grid-column: span 12; }
+        .visual-grid { margin-top: 4rem; }
+        .visual-grid::before { left: 50%; }
+    }
+
+    @media (max-width: 768px) {
+        .col-1, .col-2, .col-3, .col-4, .col-5, .col-6, .col-7, .col-8, .col-9, .col-10, .col-11, .col-12 {
+            grid-column: span 12;
+        }
+        .code-container { flex-direction: column; align-items: flex-start; gap: 1rem; }
+        .copy-btn { margin-left: 0; }
+        .visual-grid { grid-template-columns: 1fr; gap: 3rem; }
+        .visual-grid::before { display: none; }
+        footer { flex-direction: column; gap: 1rem; text-align: center; }
+        h1 { font-size: 2.5rem; }
+        .hero-icon-container { display: none; }
+    }
+</style>
+</head>
+<body vid="6">
+
+<canvas id="noise-canvas" vid="7"></canvas>
+
+<svg class="svg-defs" vid="8">
+    <defs vid="9">
+        <pattern id="halftone" width="4" height="4" patternUnits="userSpaceOnUse" vid="10">
+            <circle cx="2" cy="2" r="1.3" fill="#18191b" vid="11"></circle>
+        </pattern>
+        
+        <radialGradient id="glow-lavender" cx="50%" cy="50%" r="50%" vid="12">
+            <stop offset="0%" stop-color="#9b8fff" stop-opacity="0.9" vid="13"></stop>
+            <stop offset="60%" stop-color="#9b8fff" stop-opacity="0.4" vid="14"></stop>
+            <stop offset="100%" stop-color="#9b8fff" stop-opacity="0" vid="15"></stop>
+        </radialGradient>
+
+        <radialGradient id="glow-white" cx="50%" cy="50%" r="50%" vid="16">
+            <stop offset="0%" stop-color="#e4e4e7" stop-opacity="0.8" vid="17"></stop>
+            <stop offset="60%" stop-color="#e4e4e7" stop-opacity="0.3" vid="18"></stop>
+            <stop offset="100%" stop-color="#e4e4e7" stop-opacity="0" vid="19"></stop>
+        </radialGradient>
+    </defs>
+</svg>
+
+<div class="frame" vid="20">
+    <header vid="21">
+        <div class="logo-area" vid="22">
+            dothething
+        </div>
+        <div class="meta-heading" style="margin:0; align-self:center;" vid="23">
+            THE AGENT THAT GETS IT DONE
+        </div>
+    </header>
+
+    <main vid="24">
+        <section class="grid hero-section" vid="25">
+            <div class="col-5 hero-text-block" vid="26">
+                <div class="hero-icon-container" vid="27">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" vid="28">
+                        <circle cx="12" cy="12" r="10" vid="29"></circle>
+                        <path d="M12 2v20M2 12h20" vid="30"></path>
+                        <circle cx="12" cy="12" r="3" fill="currentColor" vid="31"></circle>
+                    </svg>
+                </div>
+                <h1 vid="32">You describe<br vid="33">the thing.<br vid="34">It does<br vid="35">the thing.</h1>
+                <p class="one-liner text-light" vid="36">An autonomous AI agent that runs locally, thinks for itself, and gets stuff done. Give it a task, walk away, come back to results.</p>
+            </div>
+
+            <div class="col-7" vid="37">
+                <div class="visual-grid" vid="38">
+                    <div class="visual-col" vid="39">
+                        <div class="visual-meta" vid="40">
+                            Main Agent<br vid="41">
+                            <strong vid="42">Claude Opus 4.6</strong>
+                            executes core logic and tools
+                        </div>
+                        <div class="orb-stack" vid="43">
+                            <div class="orb" vid="44">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="45">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-white)" vid="46"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="47"></circle>
+                                </svg>
+                            </div>
+                            <div class="orb orb-dim-1" vid="48">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="49">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-white)" vid="50"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="51"></circle>
+                                </svg>
+                            </div>
+                            <div class="orb orb-dim-2" vid="52">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="53">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-white)" vid="54"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="55"></circle>
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="visual-col" vid="56">
+                        <div class="visual-meta" vid="57">
+                            Oracle<br vid="58">
+                            <strong vid="59">GPT-5.4</strong>
+                            consulted for complex reasoning
+                        </div>
+                        <div class="orb-stack" vid="60">
+                            <div class="orb" vid="61">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="62">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-lavender)" vid="63"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="64"></circle>
+                                </svg>
+                            </div>
+                            <div class="orb orb-dim-1" vid="65">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="66">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-lavender)" vid="67"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="68"></circle>
+                                </svg>
+                            </div>
+                            <div class="orb orb-dim-2" vid="69">
+                                <svg viewBox="0 0 100 100" width="100%" height="100%" vid="70">
+                                    <circle cx="50" cy="50" r="45" fill="url(#glow-lavender)" vid="71"></circle>
+                                    <circle cx="50" cy="50" r="45" fill="url(#halftone)" vid="72"></circle>
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="install-block" vid="73">
+            <div class="meta-heading" vid="74">INITIALIZATION // INSTALL SCRIPT</div>
+            <div class="code-container" vid="75">
+                <code id="install-cmd" vid="76">mkdir -p ~/.local/bin &amp;&amp; curl -fsSL dotheth.ing/dtt.sh -o ~/.local/bin/dtt &amp;&amp; chmod +x ~/.local/bin/dtt</code>
+                <button class="copy-btn" onclick="copyCommand()" vid="77">Copy</button>
+            </div>
+            <div class="req-note" vid="78">
+                SYS.REQ: Python 3, Git, OpenRouter API key. // ENV: macOS / Linux / WSL. // DIR: /tmp/dothething/
+            </div>
+        </section>
+
+        <section class="grid section-block" vid="79">
+            <div class="col-4 col-divider" vid="80">
+                <div class="meta-heading" vid="81">SEC 01 // CAPABILITIES</div>
+                <p class="text-light" vid="82">NOT just a coding agent. DTT operates across functional domains autonomously.</p>
+                <br vid="83">
+                <ul class="feature-list" vid="84">
+                    <li vid="85"><strong vid="86">Research &amp; Analysis</strong> Synthesizes data and writes comprehensive reports.</li>
+                    <li vid="87"><strong vid="88">Data Extraction</strong> Processes documents and outputs structured formats.</li>
+                    <li vid="89"><strong vid="90">System Administration</strong> Automates local configuration and maintenance tasks.</li>
+                    <li vid="91"><strong vid="92">Web Investigation</strong> Conducts competitive analysis via real browser instances.</li>
+                </ul>
+            </div>
+
+            <div class="col-8 col-padded" vid="93">
+                <div class="meta-heading" vid="94">SEC 02 // CORE MECHANICS</div>
+                <div class="grid" style="gap: 2rem;" vid="95">
+                    <div class="col-6" vid="96">
+                        <ul class="feature-list" vid="97">
+                            <li vid="98"><strong vid="99">Workflow Architecture</strong>
+                            Describe task in plain language → agent drafts numbered plan → executes autonomously → searches web, reads/writes files, runs shell commands → delivers final output.</li>
+                            <li vid="100"><strong vid="101">Result Mode</strong>
+                            Every tool call includes a <code vid="102">result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Sonnet 4.6) for focused summary, preserving context window.</li>
+                        </ul>
+                    </div>
+                    <div class="col-6" vid="103">
+                        <ul class="feature-list" vid="104">
+                            <li vid="105"><strong vid="106">Thread Persistence</strong>
+                            Sessions save to <code vid="107">~/.dtt/threads/</code> with timestamped IDs. Seamlessly resume via CLI flag <code vid="108">--resume <id vid="109"></id></code>.</li>
+                            <li vid="110"><strong vid="111">Cost Tracking</strong>
+                            Fetches live cost data from OpenRouter post-execution. Prints deterministic breakdown: tokens in/out, reasoning cache, dollar cost.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid section-block" vid="112">
+            <div class="col-7 col-divider" vid="113">
+                <div class="meta-heading" vid="114">SYS.TOOLS // MODULE REGISTRY</div>
+                <div class="tool-grid" vid="115">
+                    <div class="tool-item" vid="116">
+                        <span class="tool-name" vid="117">file_ops</span>
+                        <div class="tool-desc" vid="118">read_file, write_file, edit_file, batch_read, diff_files</div>
+                    </div>
+                    <div class="tool-item" vid="119">
+                        <span class="tool-name" vid="120">search</span>
+                        <div class="tool-desc" vid="121">glob, list_dir, search_file</div>
+                    </div>
+                    <div class="tool-item" vid="122">
+                        <span class="tool-name" vid="123">shell</span>
+                        <div class="tool-desc" vid="124">run_command</div>
+                    </div>
+                    <div class="tool-item" vid="125">
+                        <span class="tool-name" vid="126">web</span>
+                        <div class="tool-desc" vid="127">search_web (SearXNG), fetch_page (browser), http_request</div>
+                    </div>
+                    <div class="tool-item" vid="128">
+                        <span class="tool-name" vid="129">vision</span>
+                        <div class="tool-desc" vid="130">analyze_image</div>
+                    </div>
+                    <div class="tool-item" vid="131">
+                        <span class="tool-name" vid="132">notes</span>
+                        <div class="tool-desc" vid="133">notes_add, notes_read, notes_clear</div>
+                    </div>
+                    <div class="tool-item" vid="134">
+                        <span class="tool-name" vid="135">planning</span>
+                        <div class="tool-desc" vid="136">plan_create, plan_remaining, plan_update</div>
+                    </div>
+                    <div class="tool-item" vid="137">
+                        <span class="tool-name" vid="138">delegate</span>
+                        <div class="tool-desc" vid="139">Farm out sub-tasks to instances.</div>
+                    </div>
+                    <div class="tool-item" vid="140">
+                        <span class="tool-name" vid="141">think</span>
+                        <div class="tool-desc" vid="142">Internal reasoning scratchpad.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-5 col-padded" vid="143">
+                <div class="meta-heading" vid="144">CLI.FLAGS // PARAMETERS</div>
+                <table class="data-table" vid="145">
+                    <tbody vid="146">
+                        <tr vid="147"><td class="col-key" vid="148">--prompt</td><td class="col-val" vid="149">Initial task description.</td></tr>
+                        <tr vid="150"><td class="col-key" vid="151">--fast</td><td class="col-val" vid="152">Swaps to Opus 4.6-fast.</td></tr>
+                        <tr vid="153"><td class="col-key" vid="154">--oraclepro</td><td class="col-val" vid="155">Upgrades oracle to GPT-5.4-pro.</td></tr>
+                        <tr vid="156"><td class="col-key" vid="157">--cwd DIR</td><td class="col-val" vid="158">Set working directory.</td></tr>
+                        <tr vid="159"><td class="col-key" vid="160">--resume ID</td><td class="col-val" vid="161">Load thread from ~/.dtt/threads/</td></tr>
+                        <tr vid="162"><td class="col-key" vid="163">--max-loops N</td><td class="col-val" vid="164">Limit iteration cycles.</td></tr>
+                        <tr vid="165"><td class="col-key" vid="166">--verbose</td><td class="col-val" vid="167">Stream raw thought process.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer vid="168">
+        <div class="footer-left" vid="169">
+            <a href="https://github.com/fluffypony/dothething" target="_blank" vid="170">GITHUB.COM/FLUFFYPONY/DOTHETHING</a>
+        </div>
+        <div class="footer-main" vid="171">
+            <span vid="172">YOUR IDEAS COMPILED &amp; EXECUTED - DOTHETH.ING</span>
+        </div>
+        <div class="footer-right" vid="173">
+            BSD 3-CLAUSE LICENSED
+        </div>
+    </footer>
+</div>
+
+<script vid="174">
+    function copyCommand() {
+        const cmdText = document.getElementById('install-cmd').innerText;
+        navigator.clipboard.writeText(cmdText).then(() => {
+            const btn = document.querySelector('.copy-btn');
+            const originalText = btn.innerText;
+            btn.innerText = 'COPIED';
+            btn.style.background = 'var(--accent-lavender)';
+            btn.style.color = 'var(--bg-color)';
+            setTimeout(() => {
+                btn.innerText = originalText;
+                btn.style.background = 'transparent';
+                btn.style.color = 'var(--text-primary)';
+            }, 2000);
+        });
+    }
+
+    const canvas = document.getElementById('noise-canvas');
+    const gl = canvas.getContext('webgl', { alpha: false, antialias: false });
+
+    if (gl) {
+        const vsSource = `
+            attribute vec2 position;
+            void main() {
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const fsSource = `
+            precision highp float;
+            uniform vec2 u_resolution;
+            float random(vec2 st) {
+                return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+            }
+            void main() {
+                vec2 st = gl_FragCoord.xy / u_resolution.xy;
+                float rnd = random(st);
+                vec3 baseColor = vec3(0.094, 0.098, 0.106);
+                float noiseIntensity = 0.04;
+                vec3 finalColor = baseColor + (rnd - 0.5) * noiseIntensity;
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `;
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            return shader;
+        }
+
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+        const positionLocation = gl.getAttribLocation(program, "position");
+        const resolutionLocation = gl.getUniformLocation(program, "u_resolution");
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth * window.devicePixelRatio;
+            canvas.height = window.innerHeight * window.devicePixelRatio;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        function render() {
+            gl.useProgram(program);
+            gl.enableVertexAttribArray(positionLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.uniform2f(resolutionLocation, canvas.width, canvas.height);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        window.addEventListener('resize', () => { resizeCanvas(); render(); });
+        resizeCanvas();
+        render();
+    }
+</script>
+
+</body></html>
