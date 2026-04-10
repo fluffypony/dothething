@@ -2346,6 +2346,11 @@ class Agent:
         "plan_update":     "_tool_plan_update",
         "delegate":        "_tool_delegate",
         "diff_files":      "_tool_diff_files",
+        "wait":            "_tool_wait",
+        "run_code":        "_tool_run_code",
+        "analyze_data":    "_tool_analyze_data",
+        "use_skill":       "_tool_use_skill",
+        "batch_process":   "_tool_batch_process",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False):
@@ -3001,8 +3006,27 @@ class Agent:
             return "No changes specified. Provide add_items and/or remove_ids."
         return "\n".join(result_parts)
 
-    async def _tool_delegate(self, task, input, output_format=None, **kw):
-        fmt_instruction = f"\n\nReturn your output as {output_format}." if output_format else ""
+    async def _tool_delegate(self, task, input="", output_format=None,
+                              input_file=None, **kw):
+        file_content = ""
+        if input_file:
+            p = resolve_path(self.cwd, input_file)
+            if not p.exists():
+                return f"Error: input_file not found at {input_file}"
+            if not p.is_file():
+                return f"Error: {input_file} is not a file"
+            try:
+                data = p.read_text(encoding="utf-8", errors="replace")
+                if len(data) > 280_000:
+                    data = data[:280_000] + f"\n[…truncated, {len(data)-280_000:,} chars omitted]"
+                file_content = f"\n\n## Attached File: {input_file}\n{data}"
+            except Exception as e:
+                return f"Error reading input_file: {e}"
+
+        if not input and not file_content:
+            return "Error: Either 'input' or 'input_file' must be provided."
+
+        fmt_instruction = f"\n\nReturn output as {output_format}." if output_format else ""
         try:
             resp = await self.http.post(
                 OPENROUTER_URL,
@@ -3013,18 +3037,20 @@ class Agent:
                         {
                             "role": "system",
                             "content": (
-                                "You are a focused sub-agent performing a specific task. "
-                                "Follow the instruction exactly. Be concise and precise. "
-                                "Output only what was requested — no preamble, no explanation "
-                                "unless the task asks for it." + fmt_instruction
+                                "You are a focused task executor. Follow the instruction "
+                                "precisely. Output ONLY the requested result — no preamble, "
+                                "no explanation." + fmt_instruction
                             ),
                         },
-                        {"role": "user", "content": f"## Task\n{task}\n\n## Input\n{input}"},
+                        {
+                            "role": "user",
+                            "content": f"## Task\n{task}\n\n## Input\n{input}{file_content}",
+                        },
                     ],
                     "temperature": 0.0,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                 },
-                timeout=120,
+                timeout=180,
             )
             result = resp.json()
             rid = result.get("id")
@@ -3064,6 +3090,353 @@ class Agent:
             return diff
         except Exception as e:
             return f"Error comparing files: {e}"
+
+    # ── New tool implementations ─────────────────────────────────
+    async def _tool_wait(self, seconds, reason="", **kw):
+        seconds = max(1, min(int(seconds), 300))
+        started = time.time()
+        self.spinner.update(f"Waiting {seconds}s: {reason}")
+        await asyncio.sleep(seconds)
+        ended = time.time()
+        return json.dumps({
+            "waited_seconds": seconds,
+            "reason": reason,
+            "started_at": time.strftime("%H:%M:%S", time.localtime(started)),
+            "ended_at": time.strftime("%H:%M:%S", time.localtime(ended)),
+        })
+
+    async def _tool_run_code(self, code, language="python", timeout=600, **kw):
+        timeout = max(10, min(int(timeout or 600), 3600))
+        ext_map = {"python": ".py", "bash": ".sh", "typescript": ".ts"}
+        ext = ext_map.get(language, ".py")
+
+        fd, script_path_str = tempfile.mkstemp(
+            suffix=ext, dir=str(self.cwd), prefix="_dtt_script_"
+        )
+        script_path = Path(script_path_str)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        if language == "python":
+            cmd = f"{sys.executable} {shlex.quote(str(script_path))}"
+        elif language == "bash":
+            cmd = f"bash {shlex.quote(str(script_path))}"
+        elif language == "typescript":
+            cmd = f"npx --yes tsx {shlex.quote(str(script_path))}"
+        else:
+            script_path.unlink(missing_ok=True)
+            return f"Error: Unsupported language '{language}'"
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        if self.searxng and self.searxng.url:
+            env["SEARXNG_URL"] = self.searxng.url
+            env["DTT_SEARXNG_URL"] = self.searxng.url
+            env["DTT_SEARXNG_PORT"] = str(self.searxng.port or "")
+        env["DTT_CWD"] = str(self.cwd)
+        env["DTT_BASE"] = str(BASE)
+        env["DTT_THREAD_ID"] = getattr(self, "_thread_id", "")
+        readability_path = BASE / "Readability.js"
+        if readability_path.exists():
+            env["DTT_READABILITY_JS"] = str(readability_path)
+
+        start_time = time.time()
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.cwd),
+                env=env,
+            )
+            timed_out = False
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                proc.kill()
+                stdout, stderr = await proc.communicate()
+
+            duration = round(time.time() - start_time, 3)
+            return json.dumps(
+                {
+                    "language": language,
+                    "exit_code": proc.returncode,
+                    "timed_out": timed_out,
+                    "duration_sec": duration,
+                    "stdout": stdout.decode(errors="replace"),
+                    "stderr": stderr.decode(errors="replace"),
+                    "script_path": str(script_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        except Exception as e:
+            return f"Code execution error: {e}"
+        finally:
+            try:
+                script_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def _tool_analyze_data(self, file_path, instructions, output_format="plain",
+                                  output_file=None, **kw):
+        p = resolve_path(self.cwd, file_path)
+        if not p.exists():
+            return f"Error: File not found: {file_path}"
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return f"Error reading file: {e}"
+
+        max_chunk = 200_000
+        chunks = [content[i : i + max_chunk] for i in range(0, len(content), max_chunk)]
+        all_results = []
+
+        for idx, chunk in enumerate(chunks):
+            chunk_note = f" (chunk {idx+1}/{len(chunks)})" if len(chunks) > 1 else ""
+            fmt_note = f" Output format: {output_format}." if output_format else ""
+            self.spinner.update(f"Analyzing data{chunk_note}...")
+            try:
+                resp = await self.http.post(
+                    OPENROUTER_URL,
+                    headers=self.headers,
+                    json={
+                        "model": SONNET,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"You are a data processing specialist.{chunk_note} "
+                                    "Follow the instruction exactly. Be thorough and precise. "
+                                    "Do NOT omit entries or summarize unless explicitly "
+                                    "instructed to. Preserve all relevant data. Output ONLY "
+                                    f"the processed result.{fmt_note}"
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"## Instructions\n{instructions}\n\n"
+                                    f"--- DATA ---\n{chunk}"
+                                ),
+                            },
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": 16384,
+                    },
+                    timeout=180,
+                )
+                result = resp.json()
+                rid = result.get("id")
+                if rid:
+                    await self.cost_tracker.track(rid, "sonnet")
+                if "error" in result:
+                    err = result["error"]
+                    all_results.append(
+                        f"Error on chunk {idx+1}: "
+                        f"{err.get('message', err) if isinstance(err, dict) else err}"
+                    )
+                    continue
+                text = result["choices"][0]["message"]["content"]
+                if isinstance(text, list):
+                    text = "\n".join(
+                        x.get("text", "") if isinstance(x, dict) else str(x) for x in text
+                    )
+                all_results.append(text)
+            except Exception as e:
+                all_results.append(f"Error processing chunk {idx+1}: {e}")
+
+        combined = "\n".join(all_results)
+
+        if output_file:
+            op = resolve_path(self.cwd, output_file)
+            op.parent.mkdir(parents=True, exist_ok=True)
+            op.write_text(combined, encoding="utf-8")
+            return f"Analysis written to {output_file} ({len(combined):,} chars, {len(chunks)} chunk(s))"
+        return combined
+
+    async def _tool_use_skill(self, skill_name, input_data="", **kw):
+        skill = self.skill_manager.get_skill(skill_name)
+        if not skill:
+            available = ", ".join(self.skill_manager.list_skills().keys()) or "(none loaded)"
+            return f"Error: Skill '{skill_name}' not found. Available skills: {available}"
+
+        skill_content = skill["content"]
+        skill_model = skill["frontmatter"].get("model", SONNET)
+
+        try:
+            resp = await self.http.post(
+                OPENROUTER_URL,
+                headers=self.headers,
+                json={
+                    "model": skill_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are executing a skill. Follow the skill instructions "
+                                f"exactly.\n\n{skill_content}"
+                            ),
+                        },
+                        {"role": "user", "content": input_data or "Execute this skill."},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 16384,
+                },
+                timeout=180,
+            )
+            result = resp.json()
+            rid = result.get("id")
+            if rid:
+                await self.cost_tracker.track(rid, "sonnet")
+            if "error" in result:
+                err = result["error"]
+                return f"Skill error: {err.get('message', err) if isinstance(err, dict) else err}"
+            content = result["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "\n".join(
+                    x.get("text", "") if isinstance(x, dict) else str(x) for x in content
+                )
+            if len(content) > 50_000:
+                return await smart_summarize(
+                    content,
+                    f"Extract key results from skill '{skill_name}'",
+                    self.headers,
+                    self.cost_tracker,
+                    self.http,
+                    "use_skill",
+                )
+            return content
+        except Exception as e:
+            return f"Skill execution error: {e}"
+
+    async def _tool_batch_process(self, items_file, instruction_template, output_file,
+                                   enrich_with_search=False, concurrency=10, **kw):
+        p = resolve_path(self.cwd, items_file)
+        if not p.exists():
+            return f"Error: Items file not found: {items_file}"
+        text = p.read_text(encoding="utf-8", errors="replace")
+        try:
+            items = json.loads(text)
+            if not isinstance(items, list):
+                items = [items]
+        except json.JSONDecodeError:
+            items = [line.strip() for line in text.splitlines() if line.strip()]
+
+        if not items:
+            return "Error: No items found in file."
+
+        concurrency = max(1, min(int(concurrency or 10), 20))
+        semaphore = asyncio.Semaphore(concurrency)
+        results = [None] * len(items)
+        completed = [0]
+        errors = [0]
+
+        async def process_one(idx, item):
+            async with semaphore:
+                item_str = json.dumps(item) if isinstance(item, (dict, list)) else str(item)
+                search_context = ""
+
+                if enrich_with_search and self.searxng and self.searxng.url:
+                    try:
+                        search_q = item_str[:200]
+                        resp = await self.http.get(
+                            f"{self.searxng.url}/search",
+                            params={"q": search_q, "format": "json"},
+                            timeout=15,
+                        )
+                        if resp.status_code == 200:
+                            sr = resp.json().get("results", [])[:5]
+                            search_context = "\n".join(
+                                f"- {r.get('title', '')}: {r.get('content', '')[:200]} "
+                                f"({r.get('url', '')})"
+                                for r in sr
+                            )
+                    except Exception:
+                        pass
+
+                prompt = instruction_template.replace("{item}", item_str)
+                if "{search_results}" in prompt:
+                    prompt = prompt.replace(
+                        "{search_results}", search_context or "(no search results)"
+                    )
+                elif search_context:
+                    prompt += f"\n\nSearch results for context:\n{search_context}"
+
+                for attempt in range(3):
+                    try:
+                        resp = await self.http.post(
+                            OPENROUTER_URL,
+                            headers=self.headers,
+                            json={
+                                "model": SONNET,
+                                "messages": [
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "Process this item precisely. Return structured "
+                                            "data only. Do not add preamble or explanation."
+                                        ),
+                                    },
+                                    {"role": "user", "content": prompt},
+                                ],
+                                "temperature": 0.0,
+                                "max_tokens": 4096,
+                            },
+                            timeout=60,
+                        )
+                        r = resp.json()
+                        rid = r.get("id")
+                        if rid:
+                            await self.cost_tracker.track(rid, "sonnet")
+                        if "error" in r:
+                            if attempt < 2:
+                                await asyncio.sleep(2 * (attempt + 1))
+                                continue
+                            results[idx] = {"error": str(r["error"]), "item": item_str}
+                            errors[0] += 1
+                            return
+                        content = r["choices"][0]["message"]["content"]
+                        if isinstance(content, list):
+                            content = "\n".join(
+                                x.get("text", "") if isinstance(x, dict) else str(x)
+                                for x in content
+                            )
+                        try:
+                            results[idx] = json.loads(content)
+                        except json.JSONDecodeError:
+                            results[idx] = {"raw_response": content, "item": item_str}
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            await asyncio.sleep(2 * (attempt + 1))
+                            continue
+                        results[idx] = {"error": str(e), "item": item_str}
+                        errors[0] += 1
+
+                completed[0] += 1
+                if completed[0] % 25 == 0 or completed[0] == len(items):
+                    print(
+                        f"  batch_process: {completed[0]}/{len(items)} complete "
+                        f"({errors[0]} errors)",
+                        file=sys.stderr,
+                    )
+
+        self.spinner.update(f"Batch processing {len(items)} items (concurrency={concurrency})...")
+        await asyncio.gather(*[process_one(i, item) for i, item in enumerate(items)])
+
+        op = resolve_path(self.cwd, output_file)
+        op.parent.mkdir(parents=True, exist_ok=True)
+        op.write_text(
+            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return (
+            f"Processed {len(items)} items -> {output_file}\n"
+            f"Successful: {len(items) - errors[0]}, Errors: {errors[0]}"
+        )
 
     # ── Main loop ────────────────────────────────────────────────
     async def run(self, prompt, max_loops=MAX_LOOPS, resume_messages=None):
