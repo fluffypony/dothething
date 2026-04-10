@@ -2017,10 +2017,10 @@ class Agent:
     async def _tool_write_file(self, path, content, mode=None, **kw):
         p = resolve_path(self.cwd, path)
         mode = mode or "overwrite"
-        if mode == "create_only" and p.exists():
-            return f"Error: File already exists: {path}. Use mode='overwrite' to replace it."
         lock = await self._get_file_lock(str(p))
         async with lock:
+            if mode == "create_only" and p.exists():
+                return f"Error: File already exists: {path}. Use mode='overwrite' to replace it."
             try:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 before_hash = file_sha256(p)
@@ -2081,13 +2081,13 @@ class Agent:
                 elif mode == "line_range":
                     if start_line is None or end_line is None:
                         return "Error: start_line and end_line are required for line_range mode"
+                    if int(start_line) > int(end_line):
+                        return f"Error: Invalid line range. start_line ({start_line}) must be <= end_line ({end_line})."
                     lines = original.splitlines(keepends=True)
                     s = max(int(start_line) - 1, 0)
                     e = min(int(end_line), len(lines))
                     if s >= len(lines):
                         return f"Error: start_line {start_line} exceeds file length ({len(lines)} lines)"
-                    if s > e:
-                        return f"Error: Invalid line range. start_line must be <= end_line."
                     replacement_text = new_content if new_content is not None else ""
                     replacement_lines = replacement_text.splitlines(keepends=True)
                     if replacement_lines and not replacement_lines[-1].endswith("\n"):
@@ -2430,13 +2430,14 @@ class Agent:
             if len(body_text) > 100_000:
                 body_text = body_text[:100_000]
                 truncated = True
-            return json.dumps({
+            result = json.dumps({
                 "url": str(resp.url),
                 "status": resp.status_code,
                 "headers": dict(resp.headers),
                 "body": body_text,
                 "truncated": truncated,
             }, ensure_ascii=False, indent=2)
+            return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
         except Exception as e:
             return f"HTTP request error: {e}"
 
@@ -2735,9 +2736,12 @@ class Agent:
                 self.messages.append(r)
 
             # Error recovery nudge: if all tools failed
+            _err_prefixes = ("Error:", "Fatal tool error:", "Command error:",
+                             "Search error:", "HTTP request error:",
+                             "Image analysis error:", "Delegate error:",
+                             "Oracle error:", "Vision error:", "Tool error")
             error_results = [r for r in results
-                             if r["content"].startswith("Error:") or
-                                r["content"].startswith("Fatal tool error:")]
+                             if any(r["content"].startswith(p) for p in _err_prefixes)]
             if error_results and len(error_results) == len(results):
                 self.messages.append({
                     "role": "user",
