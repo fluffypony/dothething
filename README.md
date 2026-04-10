@@ -1,185 +1,140 @@
 # dothething
 
-**Autonomous AI agent - one shell script, zero config.**
+**An autonomous AI agent: You describe the thing. It does the thing.**
 
-[Website](https://dotheth.ing) · [GitHub](https://github.com/fluffypony/dothething) · [License](LICENSE)
+Dothething (DTT) is an autonomous AI agent that runs locally, thinks for itself, and gets stuff done. Give it a task, walk away, come back to results.
 
----
+It searches the web, reads and writes files, runs shell commands, browses pages with a real browser, and keeps working until the job is finished - or tells you why it couldn't.
 
-dothething is a single Bash script that bootstraps a fully autonomous AI agent capable of research, analysis, report writing, file manipulation, shell execution, web browsing, and more. It sets up its own Python environment, installs its own dependencies, launches a local [SearXNG](https://github.com/searxng/searxng) instance for private web search, and fetches a [Camoufox](https://github.com/nickoala/camoufox) stealth browser - all into `/tmp/dothething`. No Docker, no Node, no global installs.
+**Website:** [dotheth.ing](https://dotheth.ing)
 
-Give it a task. It makes a plan, executes it, and delivers results.
+## What it does
+
+You describe a task in plain language. The agent breaks it into steps, executes them, and delivers the output. It's not just a coding tool - it handles research, analysis, report writing, data extraction, document processing, system administration, and anything else you'd do at a terminal with a browser open.
+
+The agent:
+
+- Plans its own work and tracks progress
+- Searches the web via a local SearXNG instance (no API keys for search)
+- Browses pages with Camoufox (a stealth Firefox fork) and extracts content with Readability.js
+- Reads and edits files, runs shell commands, makes HTTP requests
+- Delegates mechanical sub-tasks to a cheaper model to save money
+- Consults GPT-5.4 as an "oracle" when it gets stuck on hard problems
+- Saves full conversation threads so you can resume interrupted work
+- Tracks costs per model across the session
 
 ## Quick start
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."
-./dtt.sh --prompt "Research the current state of solid-state batteries and write a report to batteries.md"
+git clone https://github.com/fluffypony/dothething.git
+cd dothething
+export OPENROUTER_API_KEY="your-key-here"
+./dtt.sh --prompt "Find the 10 largest public companies by revenue that went bankrupt in the last 20 years and write a markdown report with causes and timelines"
 ```
 
-Or launch the interactive multiline editor (submit with `Esc+Enter`):
+First run takes a couple minutes - it sets up a Python venv, installs SearXNG, downloads Camoufox, and grabs Readability.js. After that, startup is fast.
 
-```bash
-./dtt.sh
-```
-
-That's it. First run takes 1–2 minutes while it sets up SearXNG, Camoufox, and Python dependencies. Subsequent runs start in seconds.
+If you omit `--prompt`, it opens a multiline editor. Type your task, then hit Esc+Enter (or Ctrl+D) to submit.
 
 ## Requirements
 
-- **Python 3** (3.9+)
-- **Git**
-- **An [OpenRouter](https://openrouter.ai/) API key** set as `OPENROUTER_API_KEY`
-- Linux or macOS (anything with `/bin/bash`)
+- Python 3
+- Git
+- An [OpenRouter](https://openrouter.ai/) API key (set as `OPENROUTER_API_KEY`)
 
-Everything else is installed automatically into `/tmp/dothething`.
+Everything else is installed automatically into `/tmp/dothething` on first run.
 
 ## Usage
 
 ```
-./dtt.sh [flags] [prompt ...]
+./dtt.sh [flags]
 ```
 
-### Flags
-
-| Flag | Description |
+| Flag | What it does |
 |---|---|
-| `--prompt "..."` | Provide the task inline |
-| `--fast` | Use `claude-opus-4.6-fast` instead of `claude-opus-4.6` |
-| `--oraclepro` | Use `gpt-5.4-pro` for the oracle tool (default: `gpt-5.4`) |
-| `--cwd DIR` | Working directory for relative paths (default: `.`) |
-| `--max-loops N` | Maximum agent loop iterations (default: 200) |
-| `--resume ID` | Resume a previous thread by ID |
-| `--verbose` | Verbose error traces |
-| `--debug` | Log full API request/response payloads |
+| `--prompt "..."` | Provide the task inline instead of opening the editor |
+| `--fast` | Use claude-opus-4.6-fast (cheaper, slightly less capable) |
+| `--cwd DIR` | Set the working directory for file operations (default: `.`) |
+| `--max-loops N` | Cap the number of agent turns (default: 200) |
+| `--oraclepro` | Use GPT-5.4-pro instead of GPT-5.4 for oracle calls |
+| `--resume ID` | Pick up a previous session by thread ID |
+| `--verbose` | Show full error tracebacks |
+| `--debug` | Log raw API payloads |
 | `--keep-temp` | Don't clean up `/tmp/dothething` on exit |
-| `-h`, `--help` | Show help and exit |
-
-### Examples
-
-```bash
-# Research task
-./dtt.sh --prompt "Find the top 10 YC companies by valuation and write a CSV"
-
-# Work in a specific directory
-./dtt.sh --cwd ~/projects/myapp --prompt "Add comprehensive error handling to all API routes"
-
-# Resume a previous session
-./dtt.sh --resume 20260115-143022-a1b2c3d4
-
-# Pipe a prompt from a file
-./dtt.sh < task.txt
-
-# Use the faster (cheaper) model
-./dtt.sh --fast --prompt "Summarize all markdown files in docs/"
-```
-
-## What it can do
-
-dothething is not just a coding agent. It handles any task you can describe:
-
-- **Research and analysis** - web search, page fetching, cross-referencing sources, writing reports with citations
-- **File operations** - read, write, edit, diff, glob, batch read, search by name or content
-- **Shell execution** - run any command, scripts, build tools, test suites
-- **Data extraction** - parse PDFs, DOCX, XLSX, CSV; extract structured data into JSON/CSV/YAML
-- **Web interaction** - stealth browser with Readability.js extraction, screenshots, cookie dismissal
-- **Image analysis** - interpret screenshots, charts, diagrams, scanned documents via vision AI
-- **API interaction** - make HTTP requests, download files, interact with REST endpoints
-- **Delegation** - farm out mechanical sub-tasks (summarization, reformatting, classification) to a cheaper model
 
 ## How it works
 
-1. **`dtt.sh`** creates a Python venv in `/tmp/dothething`, installs dependencies, clones and starts SearXNG, fetches the Camoufox browser binary and Readability.js, then launches the Python agent.
+The agent runs Claude Opus through OpenRouter with a set of tools - file I/O, shell execution, web search, browser fetching, image analysis, and more. Each turn, the model decides which tools to call (often several in parallel), processes the results, and decides what to do next.
 
-2. **The agent** connects to [OpenRouter](https://openrouter.ai/) and runs an autonomous loop: it receives a task, creates a plan, and iterates - calling tools, reading results, adjusting its approach - until the task is complete or it hits the loop limit.
+A few things worth knowing:
 
-3. **Models used:**
-   - **Primary:** `claude-opus-4.6` (or `claude-opus-4.6-fast` with `--fast`)
-   - **Summarizer/delegate/vision:** `claude-sonnet-4.6`
-   - **Oracle (second opinion):** `gpt-5.4` (or `gpt-5.4-pro` with `--oraclepro`)
+**result_mode.** Every tool call includes a `result_mode` parameter. Set it to `"raw"` for exact output, or pass a goal string like `"extract all function signatures and their docstrings"` - the output gets piped through Sonnet for a focused summary before the agent sees it. This is how it manages context on long tasks without drowning in output.
 
-4. **Thread persistence:** every session is saved to `~/.dtt/threads/<id>/` with full message history and metadata. Resume any session with `--resume`.
+**Planning.** The agent creates a numbered plan at the start of every task and marks items complete as it goes. If scope changes mid-task, it adds or removes steps. You can see the plan evolving in the stderr output.
 
-## Tools
+**Thread persistence.** Every session is saved to `~/.dtt/threads/` with a timestamped ID. If you interrupt a run or it hits the loop limit, you can resume with `--resume <thread-id>`. The thread ID is printed at the end of every session.
 
-The agent has access to 22 tools:
+**Cost tracking.** The agent fetches cost data from OpenRouter's generation stats API after each call. At the end of the session, it prints a breakdown by model - tokens in, tokens out, reasoning tokens, cached tokens, and dollar cost.
 
-| Tool | Purpose |
-|---|---|
-| `read_file` | Read files with line numbers; handles PDF, DOCX, XLSX, CSV |
-| `write_file` | Write files with create-only safety mode |
-| `edit_file` | Edit via search/replace, line range, insert, regex, or unified diff |
-| `glob` | Find files by pattern |
-| `search_file` | Search by filename or content (uses ripgrep) |
-| `list_dir` | List directory contents with metadata |
-| `batch_read` | Read multiple files in one call |
-| `diff_files` | Compare two files |
-| `run_command` | Execute shell commands |
-| `search_web` | Private web search via local SearXNG |
-| `fetch_page` | Fetch web pages as markdown, text, HTML, or screenshot |
-| `http_request` | Direct HTTP requests for APIs and downloads |
-| `analyze_image` | Vision AI for screenshots, charts, documents |
-| `delegate` | Farm out sub-tasks to a fast, cheap model |
-| `oracle` | Consult a separate frontier model for hard problems |
-| `notes_add/read/clear` | Persistent working memory across turns |
-| `plan_create/remaining/completed/update` | Structured task planning |
-| `think` | Free-form reasoning scratchpad (zero cost) |
-| `finalize` | End the task and present results |
+**Stagnation detection.** If the agent repeats the same tool calls three turns in a row, it gets a nudge to try a different approach. If it refuses to use tools at all for three turns, the session stops.
 
-Every tool call (except `finalize` and `think`) takes a `result_mode` parameter: set it to `"raw"` for exact output, or provide a goal string (e.g., `"extract all function signatures"`) to have the output summarized by Sonnet before it enters context. This is the primary lever for managing the context window on long tasks.
+## Models
 
-## Context and cost management
+| Role | Default model | Flag to change |
+|---|---|---|
+| Main agent | Claude Opus 4.6 | `--fast` for Opus 4.6-fast |
+| Summarizer & delegate | Claude Sonnet 4.6 | - |
+| Oracle | GPT-5.4 | `--oraclepro` for GPT-5.4-pro |
 
-- **Summarization by default:** large tool outputs are summarized by Sonnet, keeping context lean. Use `result_mode="raw"` only when you need exact content.
-- **Parallel execution:** independent tool calls in the same turn run concurrently.
-- **Stagnation detection:** the agent is nudged if it repeats the same tool calls three turns in a row.
-- **Context warnings:** the agent is alerted when approaching context window limits.
-- **Cost tracking:** session cost is reported at the end, broken down by model, with token counts.
+All calls go through OpenRouter, so you need one API key regardless of which underlying providers are used.
 
-## Thread management
+## Tools the agent has access to
 
-Sessions are persisted to `~/.dtt/threads/`:
+- **read_file / write_file / edit_file / batch_read / diff_files** - File operations with line numbers, partial reads, search/replace editing, regex mode, and document parsing (PDF, DOCX, XLSX, CSV)
+- **glob / list_dir / search_file** - Find files by name or content (uses ripgrep when available)
+- **run_command** - Shell execution with timeout, stdin, and environment variables
+- **search_web** - Local SearXNG search with categories and time filtering
+- **fetch_page** - Browser-based page fetching with Readability.js extraction, screenshots, or lightweight text mode
+- **http_request** - Direct HTTP for REST APIs, downloads, webhooks
+- **analyze_image** - Vision analysis via Sonnet for screenshots, charts, diagrams
+- **notes_add / notes_read / notes_clear** - Persistent scratchpad that survives context pressure
+- **delegate** - Farm out mechanical sub-tasks to Sonnet (no tool access, text-in text-out)
+- **oracle** - Ask GPT-5.4 for a second opinion on hard problems
+- **plan_create / plan_remaining / plan_completed / plan_update** - Task planning and progress tracking
+- **think** - Free-form reasoning scratchpad (no API cost)
+- **finalize** - End the task and present results
 
-```
-~/.dtt/threads/
-  20260115-143022-a1b2c3d4/
-    messages.json    # Full conversation history
-    meta.json        # Model, prompt, timestamps
+## Examples
+
+Research task:
+```bash
+./dtt.sh --prompt "Compare the mass transit systems of Tokyo, London, and New York. Write a report covering ridership, coverage area, cost per ride, and age of infrastructure. Save to transit_comparison.md"
 ```
 
-Resume any session:
+Data extraction:
+```bash
+./dtt.sh --cwd ./my-project --prompt "Find every API endpoint in this codebase and output them as a JSON file with method, path, handler, and auth requirements"
+```
 
+Analysis:
+```bash
+./dtt.sh --prompt "Download the CSV from https://example.com/data.csv, find the top 10 customers by lifetime revenue, and write the results to a markdown table"
+```
+
+Resuming an interrupted session:
 ```bash
 ./dtt.sh --resume 20260115-143022-a1b2c3d4
 ```
 
-List previous threads:
+## Where things live
 
-```bash
-ls ~/.dtt/threads/
-```
-
-## Environment variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `OPENROUTER_API_KEY` | Yes | Your [OpenRouter](https://openrouter.ai/) API key |
-
-## What gets installed where
-
-Everything is self-contained:
-
-| Location | Contents |
+| Path | Contents |
 |---|---|
-| `/tmp/dothething/venv/` | Main Python venv (agent dependencies) |
-| `/tmp/dothething/searxng/` | SearXNG source clone |
-| `/tmp/dothething/searxng_venv/` | Separate Python venv for SearXNG |
-| `/tmp/dothething/Readability.js` | Mozilla Readability for article extraction |
-| `/tmp/dothething/agent.py` | The generated agent script |
-| `~/.dtt/threads/` | Persistent thread history |
+| `/tmp/dothething/` | Runtime: Python venvs, SearXNG, Camoufox browser, Readability.js |
+| `~/.dtt/threads/` | Saved conversation threads (messages.json + meta.json per thread) |
 
-Nothing is installed globally. Delete `/tmp/dothething` to reset everything.
+The `/tmp` directory gets recreated if missing. Thread history persists across runs.
 
 ## License
 
-[BSD 3-Clause](LICENSE)
+BSD 3-Clause. See [LICENSE](LICENSE) for the full text.
