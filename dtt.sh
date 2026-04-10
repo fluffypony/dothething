@@ -4,14 +4,14 @@
 set -euo pipefail
 
 DTT_VERSION="1.0.0"
-DTT_SELF="$(realpath "$0" 2>/dev/null || (cd "$(dirname "$0")" && pwd -P)/$(basename "$0"))"
+DTT_SELF="$(realpath "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")")"
 
 BASE="/tmp/dothething"
 VENV="$BASE/venv"
 
 # ── Auto-update ─────────────────────────────────────────────────
 dtt_update() (
-    set +e
+    set +eu
     check_file="$HOME/.dtt/last-update"
     mkdir -p "$HOME/.dtt"
 
@@ -90,7 +90,7 @@ HELP
 done
 
 mkdir -p "$BASE"
-dtt_update
+dtt_update || true
 
 for required in python3 git; do
   if ! command -v "$required" >/dev/null 2>&1; then
@@ -3213,5 +3213,5 @@ if __name__ == "__main__":
 PYTHON_AGENT
 
 python "$BASE/agent.py" "$@" && _dtt_status=0 || _dtt_status=$?
-dtt_update
+dtt_update || true
 exit "$_dtt_status"
