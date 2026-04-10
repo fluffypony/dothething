@@ -1,0 +1,25 @@
+# dothething
+
+> dothething (DTT) is a fully autonomous AI agent distributed as a single bash script. It runs locally, plans its own work, searches the web, reads and writes files, runs shell commands, browses pages with a real browser, and keeps working until the job is finished. It handles research, analysis, report writing, data extraction, document processing, and system administration. Licensed under BSD 3-Clause.
+
+dothething uses Claude Opus 4.6 via OpenRouter as its primary model, Claude Sonnet 4.6 for result summarization and delegation, and GPT-5.4 as an oracle for second opinions on hard problems. It requires Python 3, Git, and an OpenRouter API key. Everything else is installed automatically on first run into /tmp/dothething/.
+
+The agent has 24 tools across file operations (read, write, edit, batch read, diff), search (glob, list directory, content search via ripgrep), shell execution, web access (SearXNG search, Camoufox browser with Readability.js, HTTP requests), vision analysis, working memory (notes), task planning, a reasoning scratchpad, delegation to a cheaper model, an oracle for second opinions, and a finalize tool to end tasks with structured output.
+
+Key features include result_mode (every tool call can be summarized by Sonnet to manage context window), thread persistence and resume (sessions saved to ~/.dtt/threads/), live cost tracking per model, stagnation detection, file-level locking for parallel edits, and fuzzy whitespace matching for search/replace operations.
+
+## Documentation
+
+- [README](https://github.com/fluffypony/dothething/blob/main/README.md): Full usage guide covering installation, CLI flags, architecture, tools, and examples
+- [Website](https://dotheth.ing): Project homepage with installation instructions and feature overview
+- [License](https://github.com/fluffypony/dothething/blob/main/LICENSE): BSD 3-Clause license
+
+## Source Code
+
+- [dtt.sh](https://github.com/fluffypony/dothething/blob/main/dtt.sh): The entire agent — bash wrapper that bootstraps a Python venv, installs dependencies, starts SearXNG, and embeds the full Python agent (~3168 lines)
+
+## Optional
+
+- [OpenRouter](https://openrouter.ai/): API provider used for all model calls (required API key)
+- [SearXNG](https://github.com/searxng/searxng): Self-hosted metasearch engine used for web search (installed automatically)
+- [Camoufox](https://github.com/nichochar/camoufox): Stealth Firefox fork used for browser-based page fetching (installed automatically)
