@@ -2528,6 +2528,12 @@ class Agent:
         self._file_locks_lock = asyncio.Lock()
         # Stagnation detection
         self._recent_tool_calls = []
+        # New managers
+        self.skill_manager = SkillManager()
+        self.mcp_manager = MCPManager()
+        # For serial-work detection and pre-finalize validation
+        self._tool_call_patterns = []
+        self._finalize_check_done = False
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -2547,6 +2553,23 @@ class Agent:
             print(f"  ✓ SearXNG on port {self.searxng.port}", file=sys.stderr)
         else:
             print("  ⚠ SearXNG unavailable — web search disabled", file=sys.stderr)
+
+        # Start MCP servers
+        if self.mcp_manager.CONFIG_PATH.exists():
+            self.spinner.start("Starting MCP servers...")
+            await self.mcp_manager.start(self.spinner)
+            self.spinner.stop()
+            for name, srv in self.mcp_manager.servers.items():
+                count = len(srv["tools_raw"])
+                sym = "✓" if count else "⚠"
+                print(f"  {sym} MCP:{name} — {count} tools", file=sys.stderr)
+
+        # Report loaded skills
+        loaded_skills = self.skill_manager.list_skills()
+        if loaded_skills:
+            print(f"  ✓ Skills: {len(loaded_skills)} loaded", file=sys.stderr)
+            for name in loaded_skills:
+                print(f"    - {name}", file=sys.stderr)
 
     # ── Tool implementations ─────────────────────────────────────
     async def _tool_read_file(self, path, start_line=None, end_line=None, **kw):
@@ -2810,6 +2833,17 @@ class Agent:
             "CI": "1",
             "PYTHONUNBUFFERED": "1",
         })
+        # Inject runtime service info
+        if self.searxng and self.searxng.url:
+            process_env["SEARXNG_URL"] = self.searxng.url
+            process_env["DTT_SEARXNG_URL"] = self.searxng.url
+            process_env["DTT_SEARXNG_PORT"] = str(self.searxng.port or "")
+        process_env["DTT_CWD"] = str(self.cwd)
+        process_env["DTT_BASE"] = str(BASE)
+        process_env["DTT_THREAD_ID"] = getattr(self, "_thread_id", "")
+        readability_path = BASE / "Readability.js"
+        if readability_path.exists():
+            process_env["DTT_READABILITY_JS"] = str(readability_path)
         if env:
             for k, v in env.items():
                 process_env[str(k)] = str(v)
@@ -3591,12 +3625,38 @@ class Agent:
         import platform as plat
         now = datetime.now().astimezone()
         thread_id = self.thread_logger.thread_id if self.thread_logger else "unknown"
+        self._thread_id = thread_id
+
+        searxng_url = self.searxng.url or "unavailable"
+        venv_path = str(VENV)
+        searxng_info = (
+            f"Running at {searxng_url} — JSON API: GET {searxng_url}/search?q=QUERY&format=json"
+            if self.searxng.url
+            else "Unavailable"
+        )
+
         sys_prompt = SYSTEM_PROMPT.format(
             cwd=self.cwd,
             datetime=now.strftime("%Y-%m-%d %H:%M %Z"),
             platform=f"{plat.system()} {plat.machine()}",
             thread_id=thread_id,
+            searxng_url=searxng_url,
+            searxng_info=searxng_info,
+            venv_path=venv_path,
         )
+
+        # Append dynamic skills section
+        skills = self.skill_manager.list_skills()
+        if skills:
+            sys_prompt += "\n<available_skills>\nAvailable skills (invoke via use_skill):\n"
+            for name, desc in skills.items():
+                sys_prompt += f"  - {name}: {desc}\n"
+            sys_prompt += "</available_skills>\n"
+
+        # Append dynamic MCP section
+        mcp_section = self.mcp_manager.get_prompt_section()
+        if mcp_section:
+            sys_prompt += "\n" + mcp_section + "\n"
 
         if resume_messages:
             # Resume: replace system prompt with fresh one, keep the rest
@@ -3800,7 +3860,7 @@ class Agent:
                 payload = {
                     "model": self.model,
                     "messages": self.messages,
-                    "tools": TOOLS,
+                    "tools": list(TOOLS) + self.mcp_manager.get_tool_definitions(),
                     "tool_choice": "auto",
                     "temperature": 0.2,
                     "max_tokens": 16384,
@@ -3898,20 +3958,31 @@ class Agent:
                     break
             self.spinner.update(f"⚡ {name}" + (f" → {brief}" if brief else ""))
 
-            method_name = self.DISPATCH.get(name)
-            if not method_name:
-                raw = f"Unknown tool: {name}"
-            else:
-                method = getattr(self, method_name, None)
-                if not method:
-                    raw = f"Tool not implemented: {name}"
-                else:
+            # MCP tool routing
+            if name.startswith("mcp__"):
+                parts = name.split("__", 2)
+                if len(parts) == 3:
                     try:
-                        raw = await method(**args)
-                    except TypeError as e:
-                        raw = f"Tool error ({name}): bad arguments — {e}"
+                        raw = await self.mcp_manager.call_tool(parts[1], parts[2], args)
                     except Exception as e:
-                        raw = f"Tool error ({name}): {e}"
+                        raw = f"MCP tool error ({name}): {e}"
+                else:
+                    raw = f"Invalid MCP tool name format: {name}"
+            else:
+                method_name = self.DISPATCH.get(name)
+                if not method_name:
+                    raw = f"Unknown tool: {name}"
+                else:
+                    method = getattr(self, method_name, None)
+                    if not method:
+                        raw = f"Tool not implemented: {name}"
+                    else:
+                        try:
+                            raw = await method(**args)
+                        except TypeError as e:
+                            raw = f"Tool error ({name}): bad arguments — {e}"
+                        except Exception as e:
+                            raw = f"Tool error ({name}): {e}"
                         if self.verbose:
                             raw += f"\n{traceback.format_exc()}"
 
@@ -3998,6 +4069,7 @@ class Agent:
         print("\n  ⏳ Cleaning up…", file=sys.stderr)
         self.searxng.stop()
         await self.browser.close()
+        await self.mcp_manager.stop()
         print("  ⏳ Fetching cost data…", file=sys.stderr)
         await self.cost_tracker.drain(timeout=30)
         if self.http:
