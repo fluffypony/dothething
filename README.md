@@ -1,151 +1,185 @@
 # dothething
 
-A terminal agent that keeps going until the job is done. Give it a task, walk away, come back to results.
+**Autonomous AI agent - one shell script, zero config.**
 
-It talks to [OpenRouter](https://openrouter.ai), defaults to `anthropic/claude-opus-4.6`, and has unrestricted access to your filesystem, shell, and the internet. There is no approval step. It will just do the thing.
+[Website](https://dotheth.ing) · [GitHub](https://github.com/fluffypony/dothething) · [License](LICENSE)
+
+---
+
+dothething is a single Bash script that bootstraps a fully autonomous AI agent capable of research, analysis, report writing, file manipulation, shell execution, web browsing, and more. It sets up its own Python environment, installs its own dependencies, launches a local [SearXNG](https://github.com/searxng/searxng) instance for private web search, and fetches a [Camoufox](https://github.com/nickoala/camoufox) stealth browser - all into `/tmp/dothething`. No Docker, no Node, no global installs.
+
+Give it a task. It makes a plan, executes it, and delivers results.
+
+## Quick start
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+./dtt.sh --prompt "Research the current state of solid-state batteries and write a report to batteries.md"
+```
+
+Or launch the interactive multiline editor (submit with `Esc+Enter`):
+
+```bash
+./dtt.sh
+```
+
+That's it. First run takes 1–2 minutes while it sets up SearXNG, Camoufox, and Python dependencies. Subsequent runs start in seconds.
+
+## Requirements
+
+- **Python 3** (3.9+)
+- **Git**
+- **An [OpenRouter](https://openrouter.ai/) API key** set as `OPENROUTER_API_KEY`
+- Linux or macOS (anything with `/bin/bash`)
+
+Everything else is installed automatically into `/tmp/dothething`.
+
+## Usage
 
 ```
-./dothething.sh --prompt "Find the bug in src/, fix it, and make sure the tests pass."
+./dtt.sh [flags] [prompt ...]
 ```
 
-## Why this exists
+### Flags
 
-I wanted an agent I could point at a codebase and forget about. Not a chatbot that asks me seventeen clarifying questions. Not something that stops after one tool call and waits for permission. Just: here's the task, go figure it out, tell me when you're done.
+| Flag | Description |
+|---|---|
+| `--prompt "..."` | Provide the task inline |
+| `--fast` | Use `claude-opus-4.6-fast` instead of `claude-opus-4.6` |
+| `--oraclepro` | Use `gpt-5.4-pro` for the oracle tool (default: `gpt-5.4`) |
+| `--cwd DIR` | Working directory for relative paths (default: `.`) |
+| `--max-loops N` | Maximum agent loop iterations (default: 200) |
+| `--resume ID` | Resume a previous thread by ID |
+| `--verbose` | Verbose error traces |
+| `--debug` | Log full API request/response payloads |
+| `--keep-temp` | Don't clean up `/tmp/dothething` on exit |
+| `-h`, `--help` | Show help and exit |
 
-dothething boots its own environment, starts its own search engine, launches its own browser, and loops until it calls `finalize`. It reads whatever files it wants, runs your test suite if it thinks it should, and will SearXNG something if it gets confused. You get a final report and a cost summary at the end.
+### Examples
+
+```bash
+# Research task
+./dtt.sh --prompt "Find the top 10 YC companies by valuation and write a CSV"
+
+# Work in a specific directory
+./dtt.sh --cwd ~/projects/myapp --prompt "Add comprehensive error handling to all API routes"
+
+# Resume a previous session
+./dtt.sh --resume 20260115-143022-a1b2c3d4
+
+# Pipe a prompt from a file
+./dtt.sh < task.txt
+
+# Use the faster (cheaper) model
+./dtt.sh --fast --prompt "Summarize all markdown files in docs/"
+```
 
 ## What it can do
 
-The agent has 14 tools:
+dothething is not just a coding agent. It handles any task you can describe:
 
-**Files:** `read_file`, `write_file`, `edit_file`, `glob`, `search_file`
+- **Research and analysis** - web search, page fetching, cross-referencing sources, writing reports with citations
+- **File operations** - read, write, edit, diff, glob, batch read, search by name or content
+- **Shell execution** - run any command, scripts, build tools, test suites
+- **Data extraction** - parse PDFs, DOCX, XLSX, CSV; extract structured data into JSON/CSV/YAML
+- **Web interaction** - stealth browser with Readability.js extraction, screenshots, cookie dismissal
+- **Image analysis** - interpret screenshots, charts, diagrams, scanned documents via vision AI
+- **API interaction** - make HTTP requests, download files, interact with REST endpoints
+- **Delegation** - farm out mechanical sub-tasks (summarization, reformatting, classification) to a cheaper model
 
-**Shell:** `run_command` (arbitrary bash, no restrictions)
+## How it works
 
-**Web:** `search_web` (private SearXNG instance), `fetch_page` (Camoufox headless browser with Readability.js)
+1. **`dtt.sh`** creates a Python venv in `/tmp/dothething`, installs dependencies, clones and starts SearXNG, fetches the Camoufox browser binary and Readability.js, then launches the Python agent.
 
-**Planning:** `plan_create`, `plan_remaining`, `plan_completed`
+2. **The agent** connects to [OpenRouter](https://openrouter.ai/) and runs an autonomous loop: it receives a task, creates a plan, and iterates - calling tools, reading results, adjusting its approach - until the task is complete or it hits the loop limit.
 
-**Thinking:** `think` (free scratchpad), `oracle` (asks GPT-5.4 for a second opinion)
+3. **Models used:**
+   - **Primary:** `claude-opus-4.6` (or `claude-opus-4.6-fast` with `--fast`)
+   - **Summarizer/delegate/vision:** `claude-sonnet-4.6`
+   - **Oracle (second opinion):** `gpt-5.4` (or `gpt-5.4-pro` with `--oraclepro`)
 
-**Control:** `finalize` (done, here's the report)
+4. **Thread persistence:** every session is saved to `~/.dtt/threads/<id>/` with full message history and metadata. Resume any session with `--resume`.
 
-## The context window trick
+## Tools
 
-Opus has a 1M token context window, which is huge but not infinite. dothething avoids poisoning it with a simple rule: every tool call has a mandatory `result_mode` parameter.
+The agent has access to 22 tools:
 
-If `result_mode` is `"raw"`, the full output goes into context unchanged. The agent is told to use this sparingly.
+| Tool | Purpose |
+|---|---|
+| `read_file` | Read files with line numbers; handles PDF, DOCX, XLSX, CSV |
+| `write_file` | Write files with create-only safety mode |
+| `edit_file` | Edit via search/replace, line range, insert, regex, or unified diff |
+| `glob` | Find files by pattern |
+| `search_file` | Search by filename or content (uses ripgrep) |
+| `list_dir` | List directory contents with metadata |
+| `batch_read` | Read multiple files in one call |
+| `diff_files` | Compare two files |
+| `run_command` | Execute shell commands |
+| `search_web` | Private web search via local SearXNG |
+| `fetch_page` | Fetch web pages as markdown, text, HTML, or screenshot |
+| `http_request` | Direct HTTP requests for APIs and downloads |
+| `analyze_image` | Vision AI for screenshots, charts, documents |
+| `delegate` | Farm out sub-tasks to a fast, cheap model |
+| `oracle` | Consult a separate frontier model for hard problems |
+| `notes_add/read/clear` | Persistent working memory across turns |
+| `plan_create/remaining/completed/update` | Structured task planning |
+| `think` | Free-form reasoning scratchpad (zero cost) |
+| `finalize` | End the task and present results |
 
-If `result_mode` is anything else, it's treated as a goal string. The raw output gets sent to Claude Sonnet 4.6, which compacts it into a summary focused on that goal. So instead of dumping 50,000 lines of test output into context, the agent says `result_mode: "which tests failed and why"` and gets back a few paragraphs.
+Every tool call (except `finalize` and `think`) takes a `result_mode` parameter: set it to `"raw"` for exact output, or provide a goal string (e.g., `"extract all function signatures"`) to have the output summarized by Sonnet before it enters context. This is the primary lever for managing the context window on long tasks.
 
-The upshot: it can read a 10,000-line file or fetch a bloated web page and the context window barely notices.
+## Context and cost management
 
-## Install and run
+- **Summarization by default:** large tool outputs are summarized by Sonnet, keeping context lean. Use `result_mode="raw"` only when you need exact content.
+- **Parallel execution:** independent tool calls in the same turn run concurrently.
+- **Stagnation detection:** the agent is nudged if it repeats the same tool calls three turns in a row.
+- **Context warnings:** the agent is alerted when approaching context window limits.
+- **Cost tracking:** session cost is reported at the end, broken down by model, with token counts.
 
-You need `python3`, `git`, and an `OPENROUTER_API_KEY` environment variable. That's it. Everything else is bootstrapped on first run (takes a couple minutes the first time for SearXNG and Camoufox).
+## Thread management
+
+Sessions are persisted to `~/.dtt/threads/`:
+
+```
+~/.dtt/threads/
+  20260115-143022-a1b2c3d4/
+    messages.json    # Full conversation history
+    meta.json        # Model, prompt, timestamps
+```
+
+Resume any session:
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
-
-# Interactive prompt editor (Esc+Enter to submit)
-./dothething.sh
-
-# Inline prompt
-./dothething.sh --prompt "Audit this repo for security issues and write a report."
-
-# Pipe a prompt
-echo "Refactor the database layer to use connection pooling." | ./dothething.sh
-
-# Use the fast model
-./dothething.sh --fast --prompt "Add type hints to every Python file in src/"
+./dtt.sh --resume 20260115-143022-a1b2c3d4
 ```
 
-## Flags
-
-```
---fast              Use anthropic/claude-opus-4.6-fast
---oraclepro         Use openai/gpt-5.4-pro for the oracle (default: openai/gpt-5.4)
---prompt "..."      Provide task inline instead of the editor
---cwd DIR           Working directory for relative paths (default: .)
---max-loops N       Maximum agent loop iterations (default: 200)
---resume THREAD_ID  Resume a previous run (see below)
---verbose           Verbose error traces
---debug             Log full API payloads to stderr
---keep-temp         Don't delete the /tmp/dothething runtime dir on exit
-```
-
-## Thread persistence and resume
-
-Every run is saved to `~/.dtt/threads/<id>/`. The thread ID is printed at both the start and end of each run. If the agent gets interrupted (Ctrl+C, SSH drops, your cat walks on the keyboard), you can pick up where it left off:
+List previous threads:
 
 ```bash
-./dothething.sh --resume 20260409-143022-a1b2c3d4
+ls ~/.dtt/threads/
 ```
 
-The resumed session loads the full message history, refreshes the system prompt, and nudges the agent to check its plan and keep going.
+## Environment variables
 
-## How edit_file works
+| Variable | Required | Description |
+|---|---|---|
+| `OPENROUTER_API_KEY` | Yes | Your [OpenRouter](https://openrouter.ai/) API key |
 
-The agent has three ways to edit files, because LLMs are surprisingly bad at getting diffs right on the first try:
+## What gets installed where
 
-**search_replace** is the most reliable. The agent provides `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` blocks with the exact text to find and what to replace it with. The search text must match uniquely.
+Everything is self-contained:
 
-**regex** is Python `re.sub` with flags. Good for mechanical changes across a file.
+| Location | Contents |
+|---|---|
+| `/tmp/dothething/venv/` | Main Python venv (agent dependencies) |
+| `/tmp/dothething/searxng/` | SearXNG source clone |
+| `/tmp/dothething/searxng_venv/` | Separate Python venv for SearXNG |
+| `/tmp/dothething/Readability.js` | Mozilla Readability for article extraction |
+| `/tmp/dothething/agent.py` | The generated agent script |
+| `~/.dtt/threads/` | Persistent thread history |
 
-**unified_diff** is standard patch format. Works but the agent sometimes gets the context lines wrong, so search_replace is usually better.
-
-## The oracle
-
-Sometimes the agent gets stuck or faces a design decision where a second opinion would help. The `oracle` tool sends a question to GPT-5.4 (or GPT-5.4-pro with `--oraclepro`). It can optionally include the full conversation context so the oracle has the same picture the agent does.
-
-It's expensive. The agent is told to use it only when it's genuinely useful, not as a crutch.
-
-## Web access
-
-dothething starts its own SearXNG instance on a random local port. No Docker, no external service, just a Python process that gets killed on exit. The agent searches through it and gets JSON results back.
-
-For fetching actual pages, it uses Camoufox (a stealth Firefox fork) through Playwright. Three modes:
-
-- **markdown**: injects Mozilla's Readability.js into the rendered page, extracts the article content, converts to markdown. This is how Firefox Reader Mode works under the hood. Falls back to stripping scripts/nav/etc. and converting what's left.
-- **screenshot**: saves a PNG. Can capture above the fold, below the fold, or the full page.
-- **html**: returns the final rendered DOM after all JavaScript has run.
-
-## Cost tracking
-
-Every OpenRouter API call gets its generation ID queued for stats lookup. A background worker fetches cost and token data from OpenRouter's `/generation` endpoint, retrying if the stats aren't available yet (they usually take a second or two to show up). When the agent finishes, it drains the queue and prints a breakdown by model:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Session cost: $1.2340
-    anthropic/claude-opus-4.6: $1.0821, 3 calls, 847,291 in / 12,440 out
-    anthropic/claude-sonnet-4.6: $0.1180, 8 calls, 142,500 in / 6,200 out
-    openai/gpt-5.4: $0.0339, 1 call, 4,200 in / 1,800 out
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-Opus at 1M context is not cheap. You'll want this visibility.
-
-## What happens on first run
-
-The bootstrapper creates a venv in `/tmp/dothething/`, installs dependencies, clones SearXNG into a separate venv (so its dependencies don't conflict), downloads the Camoufox browser binary, and grabs Readability.js from a CDN. Subsequent runs skip all of this.
-
-If something gets corrupted, delete `/tmp/dothething/` and it'll rebuild from scratch.
-
-## Things to know
-
-**There is no sandbox.** The agent runs commands as your user. It can `rm -rf` things. It can `curl` things. It can rewrite your SSH config. Don't point it at anything you wouldn't trust a careless junior developer with sudo access to touch.
-
-**The JSON fallback matters.** If OpenRouter's native tool-calling breaks (it sometimes does, depending on the model and provider), the agent falls back to parsing JSON tool calls from the model's text output. This is why the system prompt includes a JSON format spec. It's not elegant but it keeps things working when the API is flaky.
-
-**Parallel tool calls are real.** When the agent requests multiple tools in one turn (read three files, run two commands), they all execute concurrently with `asyncio.gather`. On I/O-heavy turns this can cut wall time in half or better.
-
-**The plan tools are not just decoration.** The system prompt tells the agent to start every task with `plan_create`. In practice this makes a noticeable difference in how methodically it works through multi-step problems versus yolo-ing tool calls and losing track of where it is.
-
-## Project links
-
-- GitHub: https://github.com/fluffypony/dothething
-- Website: https://dotheth.ing
+Nothing is installed globally. Delete `/tmp/dothething` to reset everything.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+[BSD 3-Clause](LICENSE)
