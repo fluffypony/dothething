@@ -2665,6 +2665,12 @@ class Agent:
                     for p in text
                 ).strip()
 
+            # Extract reasoning blocks for continuity across turns
+            _reasoning = {}
+            for _rkey in ("reasoning", "reasoning_content"):
+                if msg.get(_rkey):
+                    _reasoning[_rkey] = msg[_rkey]
+
             if text and text.strip():
                 print(f"\n┌─ Agent {'─' * 50}", file=sys.stderr)
                 for line in text.split("\n"):
@@ -2682,7 +2688,9 @@ class Agent:
 
             if not tool_calls:
                 nudge_count += 1
-                self.messages.append({"role": "assistant", "content": text or ""})
+                _nudge_msg = {"role": "assistant", "content": text or ""}
+                _nudge_msg.update(_reasoning)
+                self.messages.append(_nudge_msg)
                 if nudge_count >= 3:
                     print("  ⚠ Model won't use tools — forcing stop.", file=sys.stderr)
                     break
@@ -2706,6 +2714,7 @@ class Agent:
                 if text:
                     assistant_msg["content"] = text
                 assistant_msg["tool_calls"] = non_fin
+                assistant_msg.update(_reasoning)
                 self.messages.append(assistant_msg)
 
                 # Execute the non-finalize tools normally (don't waste them)
@@ -2729,6 +2738,7 @@ class Agent:
             if text is not None:
                 assistant_msg["content"] = text
             assistant_msg["tool_calls"] = tool_calls
+            assistant_msg.update(_reasoning)
             self.messages.append(assistant_msg)
 
             self.spinner.start("Executing tools…")
