@@ -3988,9 +3988,18 @@ class Agent:
                                "finalize prematurely — checkpoint state and keep working.",
                 })
 
-            # Save after every tool execution
+            # Save after every tool execution (messages + plan/notes state)
             if self.thread_logger:
                 self.thread_logger.save_messages(self.messages)
+                state = {
+                    "plan_items": self.plan.items if self.plan else [],
+                    "notes_entries": self.notes._entries if self.notes else [],
+                }
+                state_path = self.thread_logger.thread_dir / "state.json"
+                try:
+                    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
 
             if self._finalized:
                 for tc, r in zip(tool_calls, results):
@@ -4283,6 +4292,18 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         meta = agent.thread_logger.load_meta()
         print(f"  ⟳ Resuming thread: {resume_id}", file=sys.stderr)
         print(f"    Original prompt: {meta.get('prompt', '(unknown)')[:80]}…", file=sys.stderr)
+        # Restore plan and notes state
+        state_path = agent.thread_logger.thread_dir / "state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+                if state.get("plan_items"):
+                    agent.plan.items = state["plan_items"]
+                if state.get("notes_entries"):
+                    agent.notes._entries = state["notes_entries"]
+                print(f"    Restored plan ({len(agent.plan.items)} items) and notes ({len(agent.notes._entries)} entries)", file=sys.stderr)
+            except Exception:
+                pass
     else:
         agent.thread_logger = ThreadLogger()
         resume_messages = None
