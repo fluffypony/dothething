@@ -900,22 +900,34 @@ class MCPManager:
                 args = srv_config.get("args", [])
                 raw_env = srv_config.get("env", {})
                 expanded_env = self._expand_env_dict(raw_env)
-                env = {**os.environ, **expanded_env}
+                # Only pass PATH + explicitly configured env vars to MCP servers
+                # to avoid leaking secrets like OPENROUTER_API_KEY
+                env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+                if os.environ.get("HOME"):
+                    env["HOME"] = os.environ["HOME"]
+                env.update(expanded_env)
 
                 params = StdioServerParameters(
                     command=cmd,
                     args=args,
                     env=env,
                 )
-                transport = await self._exit_stack.enter_async_context(
-                    stdio_client(params)
-                )
+                # Timeout MCP connection to prevent hanging on bad servers
+                try:
+                    transport = await asyncio.wait_for(
+                        self._exit_stack.enter_async_context(
+                            stdio_client(params)
+                        ),
+                        timeout=30,
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"Connection timed out after 30s")
                 read_stream, write_stream = transport
                 session = await self._exit_stack.enter_async_context(
                     ClientSession(read_stream, write_stream)
                 )
-                await session.initialize()
-                tools_resp = await session.list_tools()
+                await asyncio.wait_for(session.initialize(), timeout=30)
+                tools_resp = await asyncio.wait_for(session.list_tools(), timeout=15)
 
                 self.servers[name] = {
                     "session": session,
@@ -3390,8 +3402,24 @@ class Agent:
         except Exception as e:
             return f"Error reading file: {e}"
 
+        # Split on line boundaries to avoid breaking JSON/CSV rows
         max_chunk = 200_000
-        chunks = [content[i : i + max_chunk] for i in range(0, len(content), max_chunk)]
+        if len(content) <= max_chunk:
+            chunks = [content]
+        else:
+            chunks = []
+            lines = content.splitlines(keepends=True)
+            current_chunk = []
+            current_size = 0
+            for line in lines:
+                if current_size + len(line) > max_chunk and current_chunk:
+                    chunks.append("".join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+                current_chunk.append(line)
+                current_size += len(line)
+            if current_chunk:
+                chunks.append("".join(current_chunk))
         all_results = []
 
         for idx, chunk in enumerate(chunks):
@@ -3462,6 +3490,10 @@ class Agent:
         if not skill:
             available = ", ".join(self.skill_manager.list_skills().keys()) or "(none loaded)"
             return f"Error: Skill '{skill_name}' not found. Available skills: {available}"
+
+        # Enforce disable-model-invocation flag
+        if skill["frontmatter"].get("disable-model-invocation", False):
+            return f"Error: Skill '{skill_name}' has model invocation disabled."
 
         skill_content = skill["content"]
         skill_model = skill["frontmatter"].get("model", SONNET)
@@ -4066,6 +4098,7 @@ class Agent:
                     if any(t in lower for t in ["tool", "tool_choice", "function calling"]):
                         payload.pop("tools", None)
                         payload.pop("tool_choice", None)
+                        payload.pop("parallel_tool_calls", None)
                         resp2 = await self.http.post(
                             OPENROUTER_URL, headers=self.headers, json=payload, timeout=600
                         )
