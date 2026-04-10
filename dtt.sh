@@ -45,6 +45,7 @@ dtt_update() (
         chmod +x "$tmp"
         if mv -f "$tmp" "$DTT_SELF"; then
             echo "▸ Updated to $remote ✓" >&2
+            return 42
         else
             rm -f "$tmp"
             echo "▸ Update available ($remote) but could not write to $DTT_SELF" >&2
@@ -93,7 +94,8 @@ HELP
 done
 
 mkdir -p "$BASE"
-dtt_update || true
+dtt_update && _upd=0 || _upd=$?
+if [ "$_upd" -eq 42 ]; then exec "$DTT_SELF" "$@"; fi
 
 for required in python3 git; do
   if ! command -v "$required" >/dev/null 2>&1; then

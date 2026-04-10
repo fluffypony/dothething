@@ -78,6 +78,8 @@ A few things worth knowing:
 
 **Stagnation detection.** If the agent repeats the same tool calls three turns in a row, it gets a nudge to try a different approach. If it refuses to use tools at all for three turns, the session stops.
 
+**Auto-update.** The script checks for updates at the start and end of each run. It hits `dotheth.ing/VERSION` at most once every six hours - if a newer version exists, it downloads the latest `dtt.sh` from GitHub and replaces itself on disk. If the check fails (no internet, server down, permissions issue), it moves on silently.
+
 ## Models
 
 | Role | Default model | Flag to change |
@@ -132,6 +134,7 @@ Resuming an interrupted session:
 |---|---|
 | `/tmp/dothething/` | Runtime: Python venvs, SearXNG, Camoufox browser, Readability.js |
 | `~/.dtt/threads/` | Saved conversation threads (messages.json + meta.json per thread) |
+| `~/.dtt/last-update` | Timestamp of the last update check |
 
 The `/tmp` directory gets recreated if missing. Thread history persists across runs.
 
