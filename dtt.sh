@@ -2292,6 +2292,9 @@ class Agent:
         result = await self.browser.fetch(url, mode, screenshot_region, timeout_ms,
                                           extract_selector=extract_selector,
                                           wait_for=wait_for)
+        # Don't wrap error messages as untrusted content
+        if result.startswith("Error"):
+            return result
         return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
 
     async def _tool_plan_create(self, items, **kw):
@@ -2736,12 +2739,15 @@ class Agent:
                 self.messages.append(r)
 
             # Error recovery nudge: if all tools failed
-            _err_prefixes = ("Error:", "Fatal tool error:", "Command error:",
-                             "Search error:", "HTTP request error:",
-                             "Image analysis error:", "Delegate error:",
-                             "Oracle error:", "Vision error:", "Tool error")
-            error_results = [r for r in results
-                             if any(r["content"].startswith(p) for p in _err_prefixes)]
+            # Broad detection: any result starting with "Error" or containing " error:" early
+            def _is_error_result(content):
+                head = content[:200].lower()
+                return (content.startswith("Error") or
+                        content.startswith("Fatal tool error") or
+                        " error:" in head or
+                        head.startswith("command error") or
+                        head.startswith("http request error"))
+            error_results = [r for r in results if _is_error_result(r["content"])]
             if error_results and len(error_results) == len(results):
                 self.messages.append({
                     "role": "user",
