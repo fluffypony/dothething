@@ -3333,6 +3333,9 @@ class Agent:
         elif language == "bash":
             cmd = f"bash {shlex.quote(str(script_path))}"
         elif language == "typescript":
+            if not shutil.which("npx"):
+                script_path.unlink(missing_ok=True)
+                return "Error: TypeScript requires Node.js/npx which is not installed on this system. Use python or bash instead."
             cmd = f"npx --yes tsx {shlex.quote(str(script_path))}"
         else:
             script_path.unlink(missing_ok=True)
@@ -3412,12 +3415,22 @@ class Agent:
             current_chunk = []
             current_size = 0
             for line in lines:
-                if current_size + len(line) > max_chunk and current_chunk:
+                line_len = len(line)
+                # Handle oversized single lines by character-splitting them
+                if line_len > max_chunk:
+                    if current_chunk:
+                        chunks.append("".join(current_chunk))
+                        current_chunk = []
+                        current_size = 0
+                    for i in range(0, line_len, max_chunk):
+                        chunks.append(line[i : i + max_chunk])
+                    continue
+                if current_size + line_len > max_chunk and current_chunk:
                     chunks.append("".join(current_chunk))
                     current_chunk = []
                     current_size = 0
                 current_chunk.append(line)
-                current_size += len(line)
+                current_size += line_len
             if current_chunk:
                 chunks.append("".join(current_chunk))
         all_results = []
