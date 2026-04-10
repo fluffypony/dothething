@@ -75,12 +75,13 @@ if [ ! -d "$VENV" ]; then
 fi
 source "$VENV/bin/activate"
 
-if [ ! -f "$BASE/.deps_v3" ]; then
+if [ ! -f "$BASE/.deps_v4" ]; then
     echo "▸ Installing dependencies (first run)..."
     pip install -q -U pip setuptools wheel 2>/dev/null
     pip install -q requests httpx "prompt_toolkit>=3" "camoufox[geoip]" playwright \
-        html-to-markdown lxml beautifulsoup4 pyyaml Pillow 2>/dev/null
-    touch "$BASE/.deps_v3"
+        html-to-markdown lxml beautifulsoup4 pyyaml Pillow \
+        markitdown pypdf python-docx openpyxl tabulate 2>/dev/null
+    touch "$BASE/.deps_v4"
 fi
 
 # ── SearXNG in its own venv ──────────────────────────────────────
@@ -648,9 +649,47 @@ class Plan:
             lines.append(f"  {s} {i['id']}. {i['text']}")
         return "\n".join(lines)
 
+    def add_items(self, items):
+        with self._lock:
+            next_id = max((i["id"] for i in self.items), default=0) + 1
+            for text in items:
+                self.items.append({"id": next_id, "text": text, "done": False})
+                next_id += 1
+            return self._fmt()
+
+    def remove_items(self, ids):
+        with self._lock:
+            id_set = set(ids)
+            self.items = [i for i in self.items if i["id"] not in id_set]
+            return self._fmt()
+
     def snapshot(self):
         with self._lock:
             return {"items": [dict(i) for i in self.items]}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Notes — persistent working memory across turns
+# ═══════════════════════════════════════════════════════════════════
+class Notes:
+    def __init__(self):
+        self._entries = []
+
+    def add(self, content):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._entries.append(f"[{ts}] {content}")
+        return f"Note #{len(self._entries)} recorded ({len(content)} chars). " \
+               f"Total notes: {len(self._entries)}. Use notes_read to recall all."
+
+    def read(self):
+        if not self._entries:
+            return "No notes yet."
+        return "\n\n".join(f"#{i+1} {e}" for i, e in enumerate(self._entries))
+
+    def clear(self):
+        n = len(self._entries)
+        self._entries.clear()
+        return f"Cleared {n} notes."
 
 # ═══════════════════════════════════════════════════════════════════
 # Utility functions
@@ -709,10 +748,50 @@ def apply_search_replace_patch(content, patch_text):
         replace = match.group(2)
         occurrences = updated.count(search)
         if occurrences == 0:
-            raise RuntimeError(f"SEARCH block did not match the file content. First 80 chars of search: {search[:80]!r}")
-        if occurrences > 1:
+            # Fallback: try whitespace-normalized matching
+            search_lines = search.split('\n')
+            norm_search_lines = [re.sub(r'[ \t]+', ' ', l).strip() for l in search_lines]
+            content_lines = updated.split('\n')
+
+            match_start = None
+            for i in range(len(content_lines) - len(search_lines) + 1):
+                window = [re.sub(r'[ \t]+', ' ', content_lines[i + j]).strip()
+                          for j in range(len(search_lines))]
+                if window == norm_search_lines:
+                    if match_start is not None:
+                        raise RuntimeError(
+                            "SEARCH block matched multiple locations (whitespace-normalized); "
+                            "make the search text more unique"
+                        )
+                    match_start = i
+
+            if match_start is not None:
+                before = content_lines[:match_start]
+                after = content_lines[match_start + len(search_lines):]
+                updated = '\n'.join(before + replace.split('\n') + after)
+                if content.endswith('\n') and not updated.endswith('\n'):
+                    updated += '\n'
+            else:
+                # Provide diagnostic: find closest matching lines
+                from difflib import get_close_matches
+                first_search_line = search_lines[0].strip() if search_lines else ""
+                close = get_close_matches(first_search_line,
+                                          [l.strip() for l in content_lines],
+                                          n=3, cutoff=0.5)
+                hint = ""
+                if close:
+                    hint = f"\n\nNearest lines in file:\n" + "\n".join(f"  {l}" for l in close)
+                    hint += f"\n\nFile has {len(content_lines)} lines. Re-read the target section " \
+                            f"with read_file (result_mode='raw') and retry with exact text."
+                raise RuntimeError(
+                    f"SEARCH block did not match the file content "
+                    f"(tried exact and whitespace-normalized). "
+                    f"First 80 chars of search: {search[:80]!r}{hint}"
+                )
+        elif occurrences > 1:
             raise RuntimeError("SEARCH block matched multiple locations; make it unique or use regex mode")
-        updated = updated.replace(search, replace, 1)
+        else:
+            updated = updated.replace(search, replace, 1)
     return updated
 
 # Unified diff patch application from GPT1
@@ -847,54 +926,65 @@ def parse_fallback_tool_calls(text):
 # ═══════════════════════════════════════════════════════════════════
 # Smart Summarizer — pipes big outputs through Sonnet
 # ═══════════════════════════════════════════════════════════════════
-async def smart_summarize(raw, goal, headers, cost_tracker, http):
+async def smart_summarize(raw, goal, headers, cost_tracker, http, tool_name="unknown"):
     if not raw or not raw.strip():
         return raw or "(empty output)"
     if len(raw) > 280_000:
         raw = raw[:280_000] + f"\n\n[…truncated, {len(raw)-280_000:,} chars omitted]"
-    try:
-        resp = await http.post(
-            OPENROUTER_URL,
-            headers=headers,
-            json={
-                "model": SONNET,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You compact tool output for an autonomous coding agent. "
-                            f"Follow the supplied goal exactly: {goal}\n"
-                            "Preserve critical facts, file paths, errors, exit codes, "
-                            "line numbers, URLs, commands, and key values. "
-                            "Be concise but do not omit information that would change "
-                            "what the agent should do next. Never invent."
-                        ),
-                    },
-                    {"role": "user", "content": raw},
-                ],
-                "temperature": 0.0,
-                "max_tokens": 4096,
-                "plugins": [{"id": "web"}],
-            },
-            timeout=120,
-        )
-        result = resp.json()
-        rid = result.get("id")
-        if rid:
-            await cost_tracker.track(rid, "sonnet")
-        if "error" in result:
-            raise RuntimeError(result["error"])
-        content = result["choices"][0]["message"]["content"]
-        if isinstance(content, list):
-            content = "\n".join(
-                p.get("text", "") if isinstance(p, dict) and p.get("type") == "text"
-                else str(p) if isinstance(p, str) else ""
-                for p in content
-            ).strip()
-        return f"[Summarized — goal: {goal}]\n{content}"
-    except Exception as e:
-        trunc = raw[:8000] + "\n[…summarization failed, showing raw head]" if len(raw) > 8000 else raw
-        return trunc
+    for attempt in range(2):
+        try:
+            resp = await http.post(
+                OPENROUTER_URL,
+                headers=headers,
+                json={
+                    "model": SONNET,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a precision summarizer for a general-purpose autonomous AI agent. "
+                                f"This output comes from the '{tool_name}' tool. "
+                                f"The agent's goal for this output is: \"{goal}\"\n\n"
+                                "Rules:\n"
+                                "1. Extract ONLY information relevant to the stated goal.\n"
+                                "2. Preserve: exact file paths, line numbers, error messages, exit codes, "
+                                "URLs, command names, numeric values, dates, config keys, identifiers, "
+                                "table data, and source attributions.\n"
+                                "3. Omit: boilerplate, repeated patterns (summarize as 'N similar entries'), "
+                                "verbose success messages, decorative formatting.\n"
+                                "4. Use compact formatting: bullets, not prose paragraphs.\n"
+                                "5. If the output contains errors/failures, lead with those.\n"
+                                "6. Never invent, infer, or add information not present in the source.\n"
+                                "7. If nothing in the output is relevant to the goal, say so explicitly."
+                            ),
+                        },
+                        {"role": "user", "content": raw},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 8192,
+                },
+                timeout=120,
+            )
+            result = resp.json()
+            rid = result.get("id")
+            if rid:
+                await cost_tracker.track(rid, "sonnet")
+            if "error" in result:
+                raise RuntimeError(result["error"])
+            content = result["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", "") if isinstance(p, dict) and p.get("type") == "text"
+                    else str(p) if isinstance(p, str) else ""
+                    for p in content
+                ).strip()
+            return f"[Summarized — goal: {goal}]\n{content}"
+        except Exception as e:
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+            trunc = raw[:8000] + "\n[…summarization failed, showing raw head]" if len(raw) > 8000 else raw
+            return trunc
 
 # ═══════════════════════════════════════════════════════════════════
 # Tool Definitions — OpenAI function-calling schema
