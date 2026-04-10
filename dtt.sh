@@ -1469,7 +1469,7 @@ TOOLS = [
                     },
                     "time_range": {
                         "type": "string",
-                        "enum": ["day", "week", "month", "year", ""],
+                        "enum": ["day", "month", "year", ""],
                         "description": "Limit results to time range (default: no limit)",
                     },
                     "result_mode": RESULT_MODE_PROP,
@@ -1681,22 +1681,29 @@ TOOLS = [
         "function": {
             "name": "delegate",
             "description": (
-                "Delegate a focused sub-task to a fast, cheap model (Sonnet). "
-                "Use for mechanical work: summarizing documents, extracting structured "
-                "data from text, reformatting content, translating, classifying items, "
-                "generating boilerplate. The delegate has NO tools — it only processes "
-                "the input you provide and returns text. For tasks requiring file/web/shell "
-                "access, do them yourself."
+                "Delegate a focused sub-task to a fast, cheap model (Sonnet 4.6). Use for: "
+                "summarizing, extracting structured data, reformatting, translating, classifying, "
+                "deduplicating search results, extracting the most relevant items from a large "
+                "dataset. Use input_file to pass file contents as context. The delegate has NO "
+                "tools — it only processes text input and returns text."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Clear, specific instruction for the sub-task"},
                     "input": {"type": "string", "description": "The content/data for the delegate to process"},
+                    "input_file": {
+                        "type": "string",
+                        "description": (
+                            "Optional path to a file whose contents will be sent as input context "
+                            "to the delegate model. Use instead of (or in addition to) the 'input' "
+                            "parameter for large datasets. Supports CSV, JSON, TXT, MD, etc."
+                        ),
+                    },
                     "output_format": {"type": "string", "description": "Expected output format (e.g. 'json', 'markdown', 'csv', 'plain text')"},
                     "result_mode": RESULT_MODE_PROP,
                 },
-                "required": ["task", "input", "result_mode"],
+                "required": ["task", "result_mode"],
             },
         },
     },
@@ -1823,6 +1830,196 @@ TOOLS = [
                     },
                 },
                 "required": ["report"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": (
+                "Sleep for a specified number of seconds. Use SPARINGLY — only when "
+                "genuinely waiting for an external process to complete (e.g. a server "
+                "starting up, a build running, a deployment propagating, a rate limit "
+                "clearing). Do NOT use to add artificial delays between tool calls or "
+                "to 'pace' work. If you need to poll, use longer intervals (10-30s) "
+                "with increasing backoff and a fixed retry cap. Max 300 seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 300,
+                        "description": "Seconds to wait (1-300)",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why you are waiting (logged for debugging)",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["seconds", "reason", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": (
+                "Write and execute a Python, Bash, or TypeScript script. The code is saved "
+                "to a temporary file and executed. Use for: batch parallel operations (e.g. "
+                "hitting SearXNG 500 times concurrently), data processing, statistical "
+                "analysis, web scraping pipelines, or any task where writing a script is more "
+                "efficient than repeated sequential tool calls.\n\n"
+                "The Python environment has: requests, httpx, asyncio, beautifulsoup4, lxml, "
+                "html-to-markdown, pyyaml, Pillow, markitdown, pypdf, openpyxl, tabulate, "
+                "and camoufox pre-installed.\n\n"
+                "Environment variables are injected automatically:\n"
+                "  SEARXNG_URL — the local SearXNG base URL for direct API access\n"
+                "  DTT_CWD — the current working directory\n"
+                "  DTT_BASE — /tmp/dothething base directory\n\n"
+                "IMPORTANT: For bulk research (50+ items), ALWAYS prefer this over repeated "
+                "sequential search_web/fetch_page calls. Write an async script that processes "
+                "all items concurrently, saves results to a file, then process that file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "bash", "typescript"],
+                        "description": "Script language (default: python)",
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Complete script source code",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default: 600, max: 3600)",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["code", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_data",
+            "description": (
+                "Send a file's contents to Sonnet 4.6 for structured processing. Use for "
+                "deduplication, extraction, filtering, classification, scoring, ranking, "
+                "reformatting, or any analytical task over a data file (JSON, CSV, text). "
+                "For files over 200K characters, content is chunked and processed in parts. "
+                "Specify output_file to write results directly to disk instead of returning "
+                "them to the conversation (recommended for large outputs)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the data file to analyze",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Precise instructions for what to do with the data",
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "Expected output format (json, csv, markdown, plain)",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "If set, write output to this file path instead of returning inline",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["file_path", "instructions", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "use_skill",
+            "description": (
+                "Invoke a loaded skill by name. Skills are user-defined procedures loaded "
+                "from ~/.dtt/skills/. The skill's instructions are executed via Sonnet as "
+                "a sub-task with the provided input. Results are returned summarized unless "
+                "small. Available skills are listed in the system prompt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill to invoke",
+                    },
+                    "input_data": {
+                        "type": "string",
+                        "description": "Input/context to pass to the skill",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["skill_name", "input_data", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "batch_process",
+            "description": (
+                "Process a large list of items in parallel using Sonnet 4.6. Each item is "
+                "processed independently with the same instruction template. Use for: bulk "
+                "research, classification, extraction, enrichment of hundreds/thousands of "
+                "items. Results are collected into a JSON array and written to output_file.\n\n"
+                "If enrich_with_search is true, each item is first searched via SearXNG and "
+                "the top search results are included as context for Sonnet's processing.\n\n"
+                "This is DRAMATICALLY more efficient than doing items one-by-one in the "
+                "agent loop. A 800-item task becomes ~3 agent turns instead of 800+.\n\n"
+                "items_file should contain a JSON array of strings/objects, or one item per line."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items_file": {
+                        "type": "string",
+                        "description": "Path to file with items (JSON array or one per line)",
+                    },
+                    "instruction_template": {
+                        "type": "string",
+                        "description": (
+                            "Instruction sent to Sonnet for each item. Use {item} as "
+                            "placeholder. Use {search_results} if enrich_with_search is true."
+                        ),
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Path for output JSON array",
+                    },
+                    "enrich_with_search": {
+                        "type": "boolean",
+                        "description": "Search SearXNG for each item first (default: false)",
+                    },
+                    "concurrency": {
+                        "type": "integer",
+                        "description": "Parallel workers (default: 10, max: 20)",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": [
+                    "items_file",
+                    "instruction_template",
+                    "output_file",
+                    "result_mode",
+                ],
             },
         },
     },
