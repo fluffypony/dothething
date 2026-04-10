@@ -4,7 +4,10 @@
 set -euo pipefail
 
 DTT_VERSION="1.0.0"
-DTT_SELF="$(realpath "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")")"
+_dtt_s="$0"
+[[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
+DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
+unset _dtt_s
 
 BASE="/tmp/dothething"
 VENV="$BASE/venv"
