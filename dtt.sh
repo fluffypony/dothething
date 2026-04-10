@@ -2694,29 +2694,29 @@ class Agent:
                 continue
             nudge_count = 0
 
-            # Validate finalize is alone (from GPT1)
+            # Validate finalize is alone — but salvage non-finalize tools
             names = [tc["function"]["name"] for tc in tool_calls]
             if "finalize" in names and (len(tool_calls) != 1 or names[0] != "finalize"):
-                # finalize must be alone
+                non_fin = [tc for tc in tool_calls if tc["function"]["name"] != "finalize"]
                 assistant_msg = {"role": "assistant"}
                 if text:
                     assistant_msg["content"] = text
-                assistant_msg["tool_calls"] = tool_calls
+                assistant_msg["tool_calls"] = non_fin
                 self.messages.append(assistant_msg)
-                fin_idx = names.index("finalize")
+
+                # Execute the non-finalize tools normally (don't waste them)
+                self.spinner.start("Executing tools…")
+                results = await self._execute_tools(non_fin)
+                self.spinner.stop()
+                for r in results:
+                    self.messages.append(r)
+
                 self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_calls[fin_idx]["id"],
-                    "content": "Error: finalize must be the only tool call in its response. Retry with finalize alone.",
+                    "role": "user",
+                    "content": "[System] You included finalize alongside other tool calls. "
+                               "finalize must be the ONLY tool call in its response. "
+                               "If you're done, call finalize alone next turn. If not, keep working.",
                 })
-                # Add empty results for non-finalize calls
-                for i, tc in enumerate(tool_calls):
-                    if i != fin_idx:
-                        self.messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": "(skipped — finalize must be alone)",
-                        })
                 if self.thread_logger:
                     self.thread_logger.save_messages(self.messages)
                 continue
@@ -2733,6 +2733,47 @@ class Agent:
 
             for r in results:
                 self.messages.append(r)
+
+            # Error recovery nudge: if all tools failed
+            error_results = [r for r in results
+                             if r["content"].startswith("Error:") or
+                                r["content"].startswith("Fatal tool error:")]
+            if error_results and len(error_results) == len(results):
+                self.messages.append({
+                    "role": "user",
+                    "content": "[System] All tool calls in this turn failed. "
+                               "Review the errors above and try a different approach.",
+                })
+
+            # Stagnation detection
+            tool_names_this_turn = tuple(sorted(tc["function"]["name"] for tc in tool_calls))
+            self._recent_tool_calls.append(tool_names_this_turn)
+            if len(self._recent_tool_calls) > 5:
+                self._recent_tool_calls.pop(0)
+            if len(self._recent_tool_calls) >= 3:
+                last_three = self._recent_tool_calls[-3:]
+                if last_three[0] == last_three[1] == last_three[2]:
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System] WARNING: You appear to be repeating the same tool calls. "
+                            "Use think to analyze why you're stuck, then try a fundamentally "
+                            "different approach. If the task is complete, call finalize."
+                        ),
+                    })
+
+            # Context window awareness
+            estimated_chars = sum(len(json.dumps(m, default=str)) for m in self.messages)
+            estimated_tokens = estimated_chars // 3
+            if estimated_tokens > 700_000:
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[System] Context window is ~{estimated_tokens:,} tokens "
+                               f"(~{estimated_tokens*100//1_000_000}% of limit). "
+                               "Use result_mode summaries aggressively. Consider finalizing "
+                               "soon if task is nearly complete. Use notes_read to check your "
+                               "accumulated findings before deciding next steps.",
+                })
 
             # Save after every tool execution
             if self.thread_logger:
@@ -2759,8 +2800,6 @@ class Agent:
                     "tool_choice": "auto",
                     "temperature": 0.2,
                     "max_tokens": 16384,
-                    # Enable native web search for the main model
-                    "plugins": [{"id": "web"}],
                     # Enable extended thinking / reasoning
                     "reasoning": {"effort": "xhigh"},
                 }
@@ -2878,7 +2917,8 @@ class Agent:
             elif result_mode and result_mode.lower() != "raw":
                 self.spinner.update(f"📝 Summarizing {name}…")
                 final = await smart_summarize(
-                    raw, result_mode, self.headers, self.cost_tracker, self.http
+                    raw, result_mode, self.headers, self.cost_tracker, self.http,
+                    tool_name=name
                 )
             else:
                 final = raw
@@ -2911,14 +2951,23 @@ class Agent:
 
     # ── Display ──────────────────────────────────────────────────
     def _show_final(self, report):
+        status_label = {
+            "complete": "✅ TASK COMPLETE",
+            "partial": "⚠️  TASK PARTIAL",
+            "failed": "❌ TASK FAILED",
+        }.get(self._final_status, "✅ TASK COMPLETE")
         print(f"\n{'═' * 58}", file=sys.stderr)
-        print("  ✅ TASK COMPLETE", file=sys.stderr)
+        print(f"  {status_label}", file=sys.stderr)
         print(f"{'═' * 58}\n", file=sys.stderr)
         print(report)
         if self._final_files:
             print("\nKey files:", file=sys.stderr)
             for f in self._final_files:
                 print(f"  - {f}", file=sys.stderr)
+        if self._final_sources:
+            print("\nSources:", file=sys.stderr)
+            for s in self._final_sources:
+                print(f"  - {s}", file=sys.stderr)
         if not sys.stdout.isatty():
             print(report, file=sys.stderr)
 
