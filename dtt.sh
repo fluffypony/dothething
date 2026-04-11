@@ -732,6 +732,10 @@ class ThreadLogger:
             self.thread_id = f"{ts}-{uid}"
             self.thread_dir = DTT_DIR / self.thread_id
         self.thread_dir.mkdir(parents=True, exist_ok=True)
+        # Per-thread scratch space for intermediate files, downloads, batch
+        # inputs/outputs, etc. Survives across turns and across --resume.
+        self.cache_dir = self.thread_dir / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def save_messages(self, messages):
         """Save the full message history."""
@@ -2563,6 +2567,12 @@ or single: {{"tool": "finalize", "arguments": {{"report": "Done."}}}}
 Working directory: {cwd}
 Platform: {platform}
 Thread: {thread_id}
+Thread cache: {cache_dir}
+  - Per-thread scratch folder that persists across turns and across --resume.
+  - Use it for intermediate files, downloaded artifacts, batch inputs/outputs,
+    parsed data, screenshots, partial results, anything you might need later.
+  - Prefer this over /tmp, $HOME, or the working directory for temporary files —
+    /tmp may be wiped, and the working directory is the user's project.
 SearXNG: {searxng_info}
 Notte: Browser framework with stealth Camoufox, content extraction, and captcha solving.
   - fetch_page for deterministic scraping (no LLM cost)
@@ -4037,10 +4047,16 @@ class Agent:
             else "Unavailable"
         )
 
+        cache_dir = (
+            str(self.thread_logger.cache_dir)
+            if self.thread_logger
+            else "(unavailable)"
+        )
         sys_prompt = SYSTEM_PROMPT.format(
             cwd=self.cwd,
             platform=f"{plat.system()} {plat.machine()}",
             thread_id=thread_id,
+            cache_dir=cache_dir,
             searxng_url=searxng_url,
             searxng_info=searxng_info,
             venv_path=venv_path,
