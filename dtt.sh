@@ -305,25 +305,41 @@ class SearXNG:
             spinner.update(f"Starting SearXNG on :{self.port}...")
 
         src = BASE / "searxng"
-        sample = src / "searx" / "settings.yml.sample"
-        if not sample.exists():
-            sample = src / "searx" / "settings.yml"
-        if not sample.exists():
-            return False
 
-        with open(sample) as f:
-            cfg = yaml.safe_load(f) or {}
-        cfg.setdefault("server", {})
-        cfg["server"]["secret_key"] = os.urandom(32).hex()
-        cfg["server"]["bind_address"] = "127.0.0.1"
-        cfg["server"]["port"] = self.port
-        cfg["server"]["limiter"] = False
-        cfg.setdefault("search", {})
-        cfg["search"]["formats"] = ["html", "json"]
+        cfg = {
+            "use_default_settings": True,
+            "server": {
+                "secret_key": os.urandom(32).hex(),
+                "bind_address": "127.0.0.1",
+                "port": self.port,
+                "limiter": False,
+            },
+            "search": {
+                "formats": ["html", "json"],
+                "default_lang": "en",
+            },
+            "engines": [
+                {"name": "google", "disabled": False},
+                {"name": "bing", "disabled": False},
+                {"name": "duckduckgo", "disabled": False},
+                {"name": "brave", "disabled": False},
+                {"name": "google images", "disabled": False},
+                {"name": "bing images", "disabled": False},
+                {"name": "google news", "disabled": False},
+                {"name": "google scholar", "disabled": False},
+                {"name": "arxiv", "disabled": False},
+                {"name": "github", "disabled": False},
+                {"name": "stackoverflow", "disabled": False},
+                {"name": "wikipedia", "disabled": False},
+                {"name": "wikidata", "disabled": False},
+            ],
+        }
 
-        self.settings_path = BASE / f"searxng_settings_{self.port}.yml"
+        settings_path = src / "searx" / "settings.yml"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path = settings_path
         with open(self.settings_path, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(cfg, f)
 
         python = str(BASE / "searxng_venv" / "bin" / "python")
         env = os.environ.copy()
@@ -628,6 +644,18 @@ class CostTracker:
                     await self._task
                 except asyncio.CancelledError:
                     pass
+
+    def record_immediate(self, model, prompt_tokens, completion_tokens,
+                         reasoning_tokens, cost, cached_tokens=0):
+        self.entries.append({
+            "label": model,
+            "model": model,
+            "cost": cost,
+            "tokens_in": prompt_tokens,
+            "tokens_out": completion_tokens,
+            "tokens_reasoning": reasoning_tokens,
+            "tokens_cached": cached_tokens,
+        })
 
     @property
     def total_cost(self):
@@ -1268,6 +1296,7 @@ async def smart_summarize(raw, goal, headers, cost_tracker, http, tool_name="unk
                     ],
                     "temperature": 0.0,
                     "max_tokens": 8192,
+                    "session_id": "summarizer",
                 },
                 timeout=120,
             )
@@ -1458,7 +1487,8 @@ TOOLS = [
                 "Search the web via local SearXNG. Returns titles, URLs, and snippets. "
                 "Use for discovery and orientation; snippets are not authoritative. "
                 "Follow up with fetch_page to verify facts from promising results. "
-                "Use categories for topic-specific results and time_range for freshness."
+                "Use categories for topic-specific results, time_range for freshness, "
+                "and engines to target specific search providers."
             ),
             "parameters": {
                 "type": "object",
@@ -1467,12 +1497,22 @@ TOOLS = [
                     "num_results": {"type": "integer", "description": "Max results (default 10)"},
                     "categories": {
                         "type": "string",
-                        "description": "SearXNG category: general (default), news, science, files, it, social+media",
+                        "description": (
+                            "SearXNG category: general (default), news, science, files, it, "
+                            "social media, images, videos, music, map"
+                        ),
                     },
                     "time_range": {
                         "type": "string",
-                        "enum": ["day", "month", "year", ""],
+                        "enum": ["day", "week", "month", "year", ""],
                         "description": "Limit results to time range (default: no limit)",
+                    },
+                    "engines": {
+                        "type": "string",
+                        "description": (
+                            "Comma-separated SearXNG engine names (e.g. 'google,bing', "
+                            "'google images', 'google scholar'). Default: all enabled engines."
+                        ),
                     },
                     "result_mode": RESULT_MODE_PROP,
                 },
@@ -1485,11 +1525,12 @@ TOOLS = [
         "function": {
             "name": "fetch_page",
             "description": (
-                "Fetch and extract content from a web page. "
-                "mode='markdown' uses Readability.js for clean article extraction — best for articles and docs. "
-                "mode='text' is a fast lightweight fetch without browser rendering. "
+                "Fetch and extract content from a web page using Notte with Camoufox (stealth Firefox). "
+                "mode='markdown' extracts clean article content using Notte's built-in scraper — best for "
+                "articles and docs. Includes automatic captcha detection and solving when TWOCAPTCHA_API_KEY "
+                "is set. mode='text' is a fast lightweight fetch without browser rendering. "
                 "mode='screenshot' saves a PNG — use analyze_image to interpret it. "
-                "mode='html' returns full rendered DOM."
+                "mode='html' returns full rendered DOM. For complex multi-step interactions, use browser_agent instead."
             ),
             "parameters": {
                 "type": "object",
@@ -1877,8 +1918,8 @@ TOOLS = [
                 "analysis, web scraping pipelines, or any task where writing a script is more "
                 "efficient than repeated sequential tool calls.\n\n"
                 "The Python environment has: requests, httpx, asyncio, beautifulsoup4, lxml, "
-                "html-to-markdown, pyyaml, Pillow, markitdown, pypdf, openpyxl, tabulate, "
-                "and camoufox pre-installed.\n\n"
+                "pyyaml, Pillow, markitdown, pypdf, openpyxl, tabulate, tiktoken, "
+                "and notte (browser automation with Camoufox) pre-installed.\n\n"
                 "Environment variables are injected automatically:\n"
                 "  SEARXNG_URL — the local SearXNG base URL for direct API access\n"
                 "  DTT_CWD — the current working directory\n"
@@ -1952,9 +1993,10 @@ TOOLS = [
             "name": "use_skill",
             "description": (
                 "Invoke a loaded skill by name. Skills are user-defined procedures loaded "
-                "from ~/.dtt/skills/. The skill's instructions are executed via Sonnet as "
-                "a sub-task with the provided input. Results are returned summarized unless "
-                "small. Available skills are listed in the system prompt."
+                "from ~/.dtt/skills/. mode='delegate' runs the skill as an isolated Sonnet "
+                "sub-task. mode='read' returns the full skill instructions into your context "
+                "so you can execute them yourself with your tools. Skills marked as inline "
+                "in the system prompt are already active — follow their instructions directly."
             ),
             "parameters": {
                 "type": "object",
@@ -1966,6 +2008,15 @@ TOOLS = [
                     "input_data": {
                         "type": "string",
                         "description": "Input/context to pass to the skill",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["delegate", "read"],
+                        "description": (
+                            "'delegate' runs the skill as an isolated sub-task via Sonnet. "
+                            "'read' returns the full skill instructions into your context so "
+                            "you can execute them yourself with your full tool access."
+                        ),
                     },
                     "result_mode": RESULT_MODE_PROP,
                 },
@@ -2022,6 +2073,40 @@ TOOLS = [
                     "output_file",
                     "result_mode",
                 ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_agent",
+            "description": (
+                "Hand control to an autonomous browser agent (Notte) that navigates, clicks, "
+                "fills forms, solves CAPTCHAs, and interacts with web pages to achieve a goal. "
+                "Use when simple page fetching isn't enough — logging in, filling multi-step forms, "
+                "navigating SPAs, interacting with dynamic content, or any task requiring multiple "
+                "browser actions. The agent uses Sonnet 4.6 for reasoning and Camoufox (stealth Firefox) "
+                "for browsing. Returns when the goal is achieved or it gives up. More expensive than "
+                "fetch_page — use only when interaction is required."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Clear description of what the browser agent should accomplish",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Starting URL (optional if the task implies navigation)",
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Max agent steps (default: 20, max: 50)",
+                    },
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["task", "result_mode"],
             },
         },
     },
@@ -2501,6 +2586,7 @@ class Agent:
         "analyze_data":    "_tool_analyze_data",
         "use_skill":       "_tool_use_skill",
         "batch_process":   "_tool_batch_process",
+        "browser_agent":   "_tool_browser_agent",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False, headed=False):
@@ -2844,9 +2930,10 @@ class Agent:
         process_env["DTT_CWD"] = str(self.cwd)
         process_env["DTT_BASE"] = str(BASE)
         process_env["DTT_THREAD_ID"] = getattr(self, "_thread_id", "")
-        readability_path = BASE / "Readability.js"
-        if readability_path.exists():
-            process_env["DTT_READABILITY_JS"] = str(readability_path)
+        if os.environ.get("TWOCAPTCHA_API_KEY"):
+            process_env["TWOCAPTCHA_API_KEY"] = os.environ["TWOCAPTCHA_API_KEY"]
+        if os.environ.get("OPENROUTER_API_KEY"):
+            process_env["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
         if env:
             for k, v in env.items():
                 process_env[str(k)] = str(v)
@@ -2885,17 +2972,16 @@ class Agent:
             return f"Command error: {e}"
 
     async def _tool_search_web(self, query, num_results=None, categories=None,
-                               time_range=None, **kw):
+                               time_range=None, engines=None, **kw):
         num_results = num_results or 10
         if not self.searxng.url:
             return "Error: SearXNG unavailable. Web search is disabled this session."
         try:
             params = {"q": query, "format": "json", "categories": categories or "general"}
             if time_range:
-                # SearXNG doesn't support 'week'; use 'month' as nearest
-                if time_range == "week":
-                    time_range = "month"
                 params["time_range"] = time_range
+            if engines:
+                params["engines"] = engines
             resp = await self.http.get(
                 f"{self.searxng.url}/search",
                 params=params,
@@ -2905,12 +2991,19 @@ class Agent:
             results = data.get("results", [])[:num_results]
             out = []
             for r in results:
-                out.append({
+                entry = {
                     "title": r.get("title", ""),
                     "url": r.get("url", ""),
                     "snippet": r.get("content", "")[:500],
                     "engine": r.get("engine", ""),
-                })
+                }
+                if r.get("img_src"):
+                    entry["img_src"] = r["img_src"]
+                if r.get("thumbnail"):
+                    entry["thumbnail"] = r["thumbnail"]
+                if r.get("publishedDate"):
+                    entry["published"] = r["publishedDate"]
+                out.append(entry)
             return f"[UNTRUSTED SEARCH RESULTS — query: {query}]\n\n{json.dumps(out, ensure_ascii=False, indent=2)}"
         except Exception as e:
             return f"Search error: {e}"
@@ -2930,26 +3023,39 @@ class Agent:
                 if "json" in content_type:
                     return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\nURL: {url}\n\n{resp.text}"
                 from bs4 import BeautifulSoup
-                from html_to_markdown import convert as to_md
                 soup = BeautifulSoup(resp.text, "lxml")
                 for tag in soup(["script", "style", "nav", "footer", "header",
                                  "aside", "iframe", "noscript", "svg"]):
                     tag.decompose()
                 body = soup.body.decode_contents() if soup.body else str(soup)
-                md = to_md(body)
-                md = re.sub(r"\n{3,}", "\n\n", md).strip()
+                md = re.sub(r"\n{3,}", "\n\n", body).strip()
                 title = soup.title.string if soup.title else url
                 return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n# {title}\n\nURL: {url}\n\n{md}"
             except Exception as e:
                 return f"Error fetching {url}: {e}"
 
-        result = await self.browser.fetch(url, mode, screenshot_region, timeout_ms,
-                                          extract_selector=extract_selector,
-                                          wait_for=wait_for)
-        # Don't wrap error messages as untrusted content
-        if result.startswith("Error"):
-            return result
-        return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
+        # Check disk cache for markdown/html modes (not screenshots)
+        if mode in ("markdown", "html"):
+            cached = self.fetch_cache.get(url, mode, extract_selector or "")
+            if cached:
+                return f"[CACHED CONTENT — source: {url}]\n\n{cached}"
+
+        try:
+            result = await self.browser.fetch(url, mode, screenshot_region, timeout_ms,
+                                              extract_selector=extract_selector,
+                                              wait_for=wait_for)
+
+            if mode in ("markdown", "html") and not result.startswith("Error"):
+                self.fetch_cache.put(result, url, mode, extract_selector or "")
+
+            if mode == "screenshot":
+                return result
+
+            if result.startswith("Error"):
+                return result
+            return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
+        except Exception as e:
+            return f"Error fetching {url}: {e}"
 
     async def _tool_plan_create(self, items, **kw):
         return self.plan.create(items)
@@ -2996,6 +3102,7 @@ class Agent:
                     "temperature": 0.2,
                     "max_tokens": 16384,
                     "reasoning": {"effort": "xhigh"},
+                    "session_id": getattr(self, "_thread_id", "") + ":oracle",
                 },
                 timeout=300,
             )
@@ -3251,6 +3358,7 @@ class Agent:
                     ],
                     "temperature": 0.0,
                     "max_tokens": 16384,
+                    "session_id": getattr(self, "_thread_id", "") + ":sonnet",
                 },
                 timeout=180,
             )
@@ -3341,9 +3449,10 @@ class Agent:
         env["DTT_CWD"] = str(self.cwd)
         env["DTT_BASE"] = str(BASE)
         env["DTT_THREAD_ID"] = getattr(self, "_thread_id", "")
-        readability_path = BASE / "Readability.js"
-        if readability_path.exists():
-            env["DTT_READABILITY_JS"] = str(readability_path)
+        if os.environ.get("TWOCAPTCHA_API_KEY"):
+            env["TWOCAPTCHA_API_KEY"] = os.environ["TWOCAPTCHA_API_KEY"]
+        if os.environ.get("OPENROUTER_API_KEY"):
+            env["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
 
         start_time = time.time()
         try:
@@ -3457,6 +3566,7 @@ class Agent:
                         ],
                         "temperature": 0.0,
                         "max_tokens": 16384,
+                        "session_id": getattr(self, "_thread_id", "") + ":sonnet",
                     },
                     timeout=180,
                 )
@@ -3489,18 +3599,52 @@ class Agent:
             return f"Analysis written to {output_file} ({len(combined):,} chars, {len(chunks)} chunk(s))"
         return combined
 
-    async def _tool_use_skill(self, skill_name, input_data="", **kw):
+    async def _tool_use_skill(self, skill_name, input_data="", mode="delegate", **kw):
         skill = self.skill_manager.get_skill(skill_name)
         if not skill:
             available = ", ".join(self.skill_manager.list_skills().keys()) or "(none loaded)"
             return f"Error: Skill '{skill_name}' not found. Available skills: {available}"
 
-        # Enforce disable-model-invocation flag
         if skill["frontmatter"].get("disable-model-invocation", False):
             return f"Error: Skill '{skill_name}' has model invocation disabled."
 
+        fm = skill.get("frontmatter", {})
+
+        # Force read mode for skills that need main agent tools
+        if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
+            mode = "read"
+
+        if mode == "read":
+            tool_map = ""
+            allowed = fm.get("allowed-tools", [])
+            if allowed:
+                mapping = {
+                    "Read": "read_file, batch_read",
+                    "Write": "write_file",
+                    "Edit": "edit_file",
+                    "Grep": "search_file",
+                    "Glob": "glob, list_dir",
+                    "Bash": "run_command, run_code",
+                    "WebFetch": "fetch_page, http_request, search_web",
+                    "AskUserQuestion": "(non-interactive — make best-effort decisions and state assumptions)",
+                }
+                mapped = []
+                for t in allowed:
+                    dtt_tools = mapping.get(t, t)
+                    mapped.append(f"  {t} -> {dtt_tools}")
+                tool_map = "\nTool mapping:\n" + "\n".join(mapped)
+
+            return (
+                f"--- SKILL INSTRUCTIONS: {skill_name} ---\n\n"
+                f"{skill.get('content', '')}\n\n"
+                f"--- INPUT DATA ---\n{input_data or '(none provided)'}\n"
+                f"{tool_map}\n\n"
+                f"[System] Follow the above skill instructions step-by-step using your available tools."
+            )
+
+        # mode == "delegate": Sonnet shell-out
         skill_content = skill["content"]
-        skill_model = skill["frontmatter"].get("model", SONNET)
+        skill_model = fm.get("model", SONNET)
 
         try:
             resp = await self.http.post(
@@ -3520,6 +3664,7 @@ class Agent:
                     ],
                     "temperature": 0.1,
                     "max_tokens": 16384,
+                    "session_id": getattr(self, "_thread_id", "") + ":sonnet",
                 },
                 timeout=180,
             )
@@ -3620,6 +3765,7 @@ class Agent:
                                 ],
                                 "temperature": 0.0,
                                 "max_tokens": 4096,
+                                "session_id": getattr(self, "_thread_id", "") + ":sonnet",
                             },
                             timeout=60,
                         )
@@ -3672,6 +3818,45 @@ class Agent:
             f"Processed {len(items)} items -> {output_file}\n"
             f"Successful: {len(items) - errors[0]}, Errors: {errors[0]}"
         )
+
+    async def _tool_browser_agent(self, task, url=None, max_steps=20, **kw):
+        max_steps = max(1, min(int(max_steps or 20), 50))
+        headed = self.headed
+
+        def _run():
+            import notte
+            with notte.Session(
+                headless=not headed,
+                browser_type="camoufox",
+                solve_captchas=bool(os.environ.get("TWOCAPTCHA_API_KEY")),
+                perception_type="fast",
+            ) as session:
+                if url:
+                    session.execute(type="goto", url=url)
+                agent = notte.Agent(
+                    session=session,
+                    reasoning_model="openrouter/anthropic/claude-sonnet-4.6",
+                    max_steps=max_steps,
+                )
+                response = agent.run(task=task)
+                result_text = str(response.answer) if hasattr(response, "answer") else str(response)
+                try:
+                    final_md = session.scrape(only_main_content=True)
+                    final_url = session.window.page.url if session.window else "(unknown)"
+                    if final_md:
+                        result_text += f"\n\n--- Final page state (URL: {final_url}) ---\n{final_md[:50000]}"
+                except Exception:
+                    pass
+                return result_text
+
+        self.spinner.update(f"Browser agent working: {task[:50]}...")
+        try:
+            result = await asyncio.to_thread(_run)
+            return f"[Browser agent result — task: {task}]\n\n{result}"
+        except Exception as e:
+            if self.verbose:
+                traceback.print_exc()
+            return f"Browser agent error: {e}"
 
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
@@ -3784,12 +3969,31 @@ class Agent:
             venv_path=venv_path,
         )
 
-        # Append dynamic skills section
-        skills = self.skill_manager.list_skills()
-        if skills:
-            sys_prompt += "\n<available_skills>\nAvailable skills (invoke via use_skill):\n"
-            for name, desc in skills.items():
+        # Classify skills as inline vs callable
+        inline_skills = []
+        callable_skills = []
+        for name, s in self.skill_manager.skills.items():
+            fm = s.get("frontmatter", {})
+            if fm.get("disable-model-invocation", False):
+                continue
+            if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
+                inline_skills.append((name, s))
+            else:
+                callable_skills.append((name, s.get("description", "")))
+
+        if inline_skills:
+            sys_prompt += "\n<inline_skills>\n"
+            sys_prompt += "The following skill instructions are active. Apply them directly to your work when relevant.\n\n"
+            for name, s in inline_skills:
+                sys_prompt += f"## Skill: {name}\n"
+                sys_prompt += f"{s.get('content', '')}\n\n"
+            sys_prompt += "</inline_skills>\n"
+
+        if callable_skills:
+            sys_prompt += "\n<available_skills>\nCallable skills (invoke via use_skill tool):\n"
+            for name, desc in callable_skills:
                 sys_prompt += f"  - {name}: {desc}\n"
+            sys_prompt += "Use mode='delegate' for isolated sub-task execution via Sonnet, or mode='read' to load the full instructions into your own context.\n"
             sys_prompt += "</available_skills>\n"
 
         # Append dynamic MCP section
@@ -3799,7 +4003,7 @@ class Agent:
 
         if resume_messages:
             # Resume: replace system prompt with fresh one, keep the rest
-            self.messages = [{"role": "system", "content": sys_prompt}]
+            self.messages = [{"role": "system", "content": [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]}]
             for m in resume_messages:
                 if m.get("role") != "system":
                     self.messages.append(m)
@@ -3809,7 +4013,7 @@ class Agent:
             })
         else:
             self.messages = [
-                {"role": "system", "content": sys_prompt},
+                {"role": "system", "content": [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]},
                 {"role": "user", "content": prompt},
             ]
 
@@ -4060,8 +4264,9 @@ class Agent:
                     "parallel_tool_calls": True,
                     "temperature": 0.2,
                     "max_tokens": 16384,
-                    # Enable extended thinking / reasoning
                     "reasoning": {"effort": "xhigh"},
+                    "session_id": getattr(self, "_thread_id", ""),
+                    "cache_control": {"type": "ephemeral"},
                 }
                 if self.debug:
                     dbg = json.dumps(payload, ensure_ascii=False)[:8000]
@@ -4088,9 +4293,34 @@ class Agent:
                     dbg_r = json.dumps(result, ensure_ascii=False)[:4000]
                     print(f"[debug] Response: {dbg_r}", file=sys.stderr)
 
-                rid = result.get("id")
-                if rid:
-                    await self.cost_tracker.track(rid, "opus")
+                usage = result.get("usage", {})
+                if usage:
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    reasoning_tokens = usage.get("reasoning_tokens", 0)
+                    inline_cost = usage.get("cost")
+                    prompt_details = usage.get("prompt_tokens_details", {})
+                    cached_tokens = prompt_details.get("cached_tokens", 0)
+                    cache_write_tokens = prompt_details.get("cache_write_tokens", 0)
+                    if self.debug and (cached_tokens or cache_write_tokens):
+                        print(f"  [Cache] cached={cached_tokens}, written={cache_write_tokens}", file=sys.stderr)
+                    if inline_cost is not None:
+                        self.cost_tracker.record_immediate(
+                            model=self.model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            reasoning_tokens=reasoning_tokens,
+                            cost=float(inline_cost),
+                            cached_tokens=cached_tokens,
+                        )
+                    else:
+                        rid = result.get("id")
+                        if rid:
+                            await self.cost_tracker.track(rid, "opus")
+                else:
+                    rid = result.get("id")
+                    if rid:
+                        await self.cost_tracker.track(rid, "opus")
 
                 if "error" in result:
                     err = result["error"]
