@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="1.1.0"
+DTT_VERSION="1.1.1"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -154,8 +154,8 @@ fi
 # ── Notte browser framework ────────────────────────────────────
 if [ ! -f "$BASE/.notte_v1" ]; then
     echo "▸ Installing Notte browser framework (first run)..."
-    pip install -q "notte[camoufox,captcha] @ git+https://github.com/fluffypony/notte.git" 2>/dev/null
-    python -m camoufox fetch 2>/dev/null
+    pip install -q "notte[camoufox,captcha] @ git+https://github.com/fluffypony/notte.git" || { echo "✗ Notte install failed" >&2; exit 1; }
+    python -m camoufox fetch || { echo "✗ Camoufox browser fetch failed" >&2; exit 1; }
     touch "$BASE/.notte_v1"
 fi
 
