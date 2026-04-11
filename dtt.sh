@@ -62,14 +62,17 @@ for arg in "$@"; do
     --keep-temp)
       KEEP_TEMP=true
       ;;
+    --headed)
+      PASS_ARGS+=("$arg")
+      ;;
     -h|--help)
       cat <<'HELP'
 dothething — autonomous AI agent | https://dotheth.ing
 
 Usage:
-  ./dothething.sh [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
-                  [--oraclepro] [--verbose] [--debug] [--keep-temp]
-                  [--resume THREAD_ID]
+  ./dtt.sh [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
+           [--oraclepro] [--headed] [--verbose] [--debug] [--keep-temp]
+           [--resume THREAD_ID]
 
 Flags:
   --fast          Use anthropic/claude-opus-4.6-fast instead of opus
@@ -78,12 +81,14 @@ Flags:
   --max-loops N   Maximum agent loop iterations (default: 200)
   --oraclepro     Use openai/gpt-5.4-pro for oracle (default: openai/gpt-5.4)
   --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/)
+  --headed        Show the browser window for visual debugging
   --verbose       Verbose error traces
   --debug         Debug-level logging of API payloads
   --keep-temp     Keep the temp runtime directory on exit
 
 Environment:
-  OPENROUTER_API_KEY   Required. Your OpenRouter API key.
+  OPENROUTER_API_KEY     Required. Your OpenRouter API key.
+  TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
 HELP
       exit 0
       ;;
@@ -126,13 +131,13 @@ if [ ! -d "$VENV" ]; then
 fi
 source "$VENV/bin/activate"
 
-if [ ! -f "$BASE/.deps_v5" ]; then
+if [ ! -f "$BASE/.deps_v6" ]; then
     echo "▸ Installing dependencies (first run)..."
     pip install -q -U pip setuptools wheel 2>/dev/null
-    pip install -q requests httpx "prompt_toolkit>=3" "camoufox[geoip]" playwright \
-        html-to-markdown lxml beautifulsoup4 pyyaml Pillow \
+    pip install -q requests httpx "prompt_toolkit>=3" \
+        lxml beautifulsoup4 pyyaml Pillow tiktoken \
         markitdown pypdf python-docx openpyxl tabulate mcp 2>/dev/null
-    touch "$BASE/.deps_v5"
+    touch "$BASE/.deps_v6"
 fi
 
 # ── SearXNG in its own venv ──────────────────────────────────────
@@ -146,34 +151,12 @@ if [ ! -f "$BASE/.searxng_v3" ]; then
     touch "$BASE/.searxng_v3"
 fi
 
-# ── Camoufox browser binary ─────────────────────────────────────
-if [ ! -f "$BASE/.camoufox_v3" ]; then
-    echo "▸ Fetching Camoufox browser (first run)..."
+# ── Notte browser framework ────────────────────────────────────
+if [ ! -f "$BASE/.notte_v1" ]; then
+    echo "▸ Installing Notte browser framework (first run)..."
+    pip install -q "notte[camoufox,captcha] @ git+https://github.com/fluffypony/notte.git" 2>/dev/null
     python -m camoufox fetch 2>/dev/null
-    touch "$BASE/.camoufox_v3"
-fi
-
-# ── Readability.js ───────────────────────────────────────────────
-if [ ! -f "$BASE/Readability.js" ] || [ ! -s "$BASE/Readability.js" ]; then
-    echo "▸ Downloading Readability.js..."
-    python3 -c "
-import urllib.request
-from pathlib import Path
-urls = [
-    'https://cdn.jsdelivr.net/npm/@mozilla/readability@0.6.2/Readability.js',
-    'https://unpkg.com/@mozilla/readability/Readability.js',
-    'https://raw.githubusercontent.com/mozilla/readability/main/Readability.js',
-]
-for url in urls:
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            data = r.read()
-            if len(data) > 100:
-                Path('$BASE/Readability.js').write_bytes(data)
-                break
-    except Exception:
-        continue
-" 2>/dev/null || true
+    touch "$BASE/.notte_v1"
 fi
 
 # ── Write and exec agent ────────────────────────────────────────
@@ -2514,17 +2497,19 @@ class Agent:
         "batch_process":   "_tool_batch_process",
     }
 
-    def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False):
+    def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False, headed=False):
         self.model = model
         self.oracle_model = oracle_model
         self.api_key = api_key
         self.cwd = cwd
         self.debug = debug
         self.verbose = verbose
+        self.headed = headed
         self.headers = _make_headers(api_key)
         self.messages = []
         self.searxng = SearXNG()
-        self.browser = Browser()
+        self.browser = Browser(headless=not headed)
+        self.fetch_cache = FetchCache()
         self.cost_tracker = CostTracker(api_key)
         self.plan = Plan()
         self.notes = Notes()
@@ -4333,8 +4318,8 @@ def read_prompt_interactive():
 
 
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
-                    debug, verbose, resume_id=None):
-    agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose)
+                    debug, verbose, headed=False, resume_id=None):
+    agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
 
     if resume_id:
         agent.thread_logger = ThreadLogger(thread_id=resume_id)
@@ -4379,7 +4364,7 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
             agent.thread_logger.save_messages(agent.messages)
         await agent.cleanup()
         print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
-        print(f"    Resume with: dothething.sh --resume {thread_id}", file=sys.stderr)
+        print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
 
 
 def main():
@@ -4394,6 +4379,7 @@ def main():
     parser.add_argument("--cwd", type=str, default=".", help="Working directory for relative paths")
     parser.add_argument("--max-loops", type=int, default=MAX_LOOPS, help=f"Maximum agent loops (default: {MAX_LOOPS})")
     parser.add_argument("--resume", type=str, default=None, metavar="THREAD_ID", help="Resume a previous thread")
+    parser.add_argument("--headed", action="store_true", help="Show the browser window for visual debugging")
     parser.add_argument("--verbose", action="store_true", help="Verbose error traces")
     parser.add_argument("--debug", action="store_true", help="Debug-level API payload logging")
     parser.add_argument("positional_prompt", nargs="*", help="Task prompt (omit for interactive editor)")
@@ -4438,6 +4424,7 @@ def main():
             max_loops=args.max_loops,
             debug=args.debug,
             verbose=args.verbose,
+            headed=args.headed,
             resume_id=args.resume,
         ))
     except KeyboardInterrupt:
