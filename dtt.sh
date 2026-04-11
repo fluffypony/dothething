@@ -361,6 +361,8 @@ class SearXNG:
         for _ in range(90):
             time.sleep(1)
             if self.process.poll() is not None:
+                client.close()
+                self.port = None
                 return False
             try:
                 resp = client.get(
@@ -373,6 +375,7 @@ class SearXNG:
             except Exception:
                 pass
         client.close()
+        self.port = None
         return False
 
     def stop(self):
@@ -444,6 +447,7 @@ class Browser:
     def __init__(self, headless=True):
         self._session = None
         self._lock = asyncio.Lock()
+        self._fetch_lock = asyncio.Lock()
         self._headless = headless
 
     async def _ensure(self):
@@ -474,7 +478,8 @@ class Browser:
             async with self._lock:
                 self._session = None
             return f"Error launching browser: {e}"
-        try:
+        async with self._fetch_lock:
+          try:
             result = await session.aexecute(type="goto", url=url)
             if not result.success:
                 return f"Error navigating to {url}: {result.message}"
@@ -483,7 +488,7 @@ class Browser:
 
             if wait_for:
                 try:
-                    await page.wait_for_selector(wait_for, timeout=10000)
+                    await page.wait_for_selector(wait_for, timeout=min(timeout_ms, 30000))
                 except Exception:
                     pass
 
@@ -555,7 +560,9 @@ class Browser:
                 current_url = page.url
                 return f"# {title}\n\nURL: {current_url}\n\n{markdown or '(empty page)'}"
 
-        except Exception as e:
+          except Exception as e:
+            async with self._lock:
+                self._session = None
             return f"Error fetching {url}: {e}"
 
     async def close(self):
@@ -3065,8 +3072,9 @@ class Agent:
                 return f"Error fetching {url}: {e}"
 
         # Check disk cache for markdown/html modes (not screenshots)
+        cache_key = (url, mode, extract_selector or "", wait_for or "")
         if mode in ("markdown", "html"):
-            cached = self.fetch_cache.get(url, mode, extract_selector or "")
+            cached = self.fetch_cache.get(*cache_key)
             if cached:
                 return f"[CACHED CONTENT — source: {url}]\n\n{cached}"
 
@@ -3076,7 +3084,7 @@ class Agent:
                                               wait_for=wait_for)
 
             if mode in ("markdown", "html") and not result.startswith("Error"):
-                self.fetch_cache.put(result, url, mode, extract_selector or "")
+                self.fetch_cache.put(result, *cache_key)
 
             if mode == "screenshot":
                 return result
@@ -3862,7 +3870,9 @@ class Agent:
                 perception_type="fast",
             ) as session:
                 if url:
-                    session.execute(type="goto", url=url)
+                    nav = session.execute(type="goto", url=url)
+                    if not nav.success:
+                        return f"Error navigating to {url}: {nav.message}"
                 agent = notte.Agent(
                     session=session,
                     reasoning_model="openrouter/anthropic/claude-sonnet-4.6",
