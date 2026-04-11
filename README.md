@@ -15,7 +15,7 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 - Browses pages with Notte and Camoufox (a stealth Firefox fork). Extracts clean content, solves captchas automatically, and handles complex multi-step web interactions
 - Reads and edits files, runs shell commands, makes HTTP requests
 - Connects to your existing MCP servers via `~/.dtt/mcp.json`
-- Loads custom skills from `~/.dtt/skills/` -- behavioral skills inject directly into the agent's context, while text-processing skills run as isolated sub-tasks
+- Loads custom skills from `~/.dtt/skills/<skill-name>/SKILL.md` (Claude Code convention) -- behavioral skills inject directly into the agent's context, while text-processing skills run as isolated sub-tasks
 - Farms out grunt work to a cheaper model. Asks GPT-5.4 for a second opinion when stuck
 - Saves full conversation threads so you can resume interrupted work
 - Tracks token usage and dollar cost via OpenRouter, with Anthropic prompt caching for cost reduction
@@ -73,7 +73,7 @@ The agent routes Claude Opus through OpenRouter. Every turn, the model decides w
 
 **Thread persistence.** Every session saves to `~/.dtt/threads/` with a timestamped ID. If you interrupt a run or hit the loop limit, resume with `--resume <thread-id>`.
 
-**Skills.** Drop markdown files into `~/.dtt/skills/` to teach the agent new procedures. Skills with `allowed-tools` in their frontmatter inject directly into the agent's context, so it follows those instructions while using its own tools. Text-processing skills run via Sonnet as isolated sub-tasks.
+**Skills.** Drop skill directories into `~/.dtt/skills/` to teach the agent new procedures. Each skill is a directory containing a `SKILL.md` file (Claude Code convention). Skills with `allowed-tools` in their frontmatter inject directly into the agent's context, so it follows those instructions while using its own tools. Text-processing skills run via Sonnet as isolated sub-tasks.
 
 **MCP servers.** Configure MCP servers in `~/.dtt/mcp.json` (same format as Claude Code). The agent picks up all connected MCP tools at startup.
 
@@ -103,7 +103,7 @@ All calls route through OpenRouter. You only need one API key.
 
 ## Skills
 
-Put markdown files in `~/.dtt/skills/`. Each file can have optional YAML frontmatter:
+Each skill lives in its own directory under `~/.dtt/skills/` as a `SKILL.md` file (matching Claude Code's convention). So a skill called `my-skill` would live at `~/.dtt/skills/my-skill/SKILL.md`. Subdirectories are scanned recursively, so you can organize skills however you like. Each `SKILL.md` can have optional YAML frontmatter:
 
 ```yaml
 ---
@@ -142,7 +142,7 @@ The agent discovers and uses all tools exposed by connected MCP servers.
 | Path | What's there |
 |---|---|
 | `~/.dtt/threads/` | Saved conversation threads (resume with `--resume`) |
-| `~/.dtt/skills/` | User-defined skills (markdown files) |
+| `~/.dtt/skills/<name>/SKILL.md` | User-defined skills (Claude Code convention) |
 | `~/.dtt/mcp.json` | MCP server configuration |
 | `/tmp/dothething/` | Runtime: Python venv, SearXNG, Camoufox browser |
 

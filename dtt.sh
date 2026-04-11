@@ -824,7 +824,7 @@ class SkillManager:
     def _load_skills(self):
         if not self.SKILL_DIR.exists():
             return
-        for md_file in self.SKILL_DIR.rglob("*.md"):
+        for md_file in self.SKILL_DIR.rglob("SKILL.md"):
             try:
                 text = md_file.read_text(encoding="utf-8", errors="replace")
                 name, desc, frontmatter = self._parse_skill(text, md_file)
@@ -839,6 +839,8 @@ class SkillManager:
                 continue
 
     def _parse_skill(self, text, path):
+        # Skill name defaults to the parent directory (Claude Code SKILL.md convention)
+        dir_name = path.parent.name if path.parent.name else path.stem
         if text.startswith("---"):
             parts = text.split("---", 2)
             if len(parts) >= 3:
@@ -847,7 +849,7 @@ class SkillManager:
                     if isinstance(meta, dict) and meta.get("name"):
                         return (
                             meta["name"],
-                            meta.get("description", path.stem),
+                            meta.get("description", dir_name),
                             meta,
                         )
                 except Exception:
@@ -858,7 +860,7 @@ class SkillManager:
             lines = text.split("\n\n")
             desc = lines[1].strip()[:200] if len(lines) > 1 else name
             return name, desc, None
-        return path.stem, f"Skill from {path.name}", None
+        return dir_name, f"Skill from {path.parent.name}/{path.name}", None
 
     def list_skills(self):
         """Return {name: description} for skills that are model-invocable."""
