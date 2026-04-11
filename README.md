@@ -25,11 +25,12 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 ```bash
 git clone https://github.com/fluffypony/dothething.git
 cd dothething
-export OPENROUTER_API_KEY="your-key-here"
 ./dtt.sh --prompt "Find the 10 largest public companies by revenue that went bankrupt in the last 20 years and write a markdown report with causes and timelines."
 ```
 
-The first run takes a couple of minutes to set up a Python venv, install SearXNG, and set up the Notte browser framework. After that, startup is fast.
+First run prompts for your OpenRouter API key (required) and a 2Captcha API key (optional), and saves them to `~/.dtt/env` (mode 0600). Subsequent runs read the keys from there. To skip the prompt, export `OPENROUTER_API_KEY` in your shell first; values in the shell environment take precedence over the saved file. To change or clear the saved keys, edit or delete `~/.dtt/env`.
+
+The first run also takes a couple of minutes to set up a Python venv, install SearXNG, and set up the Notte browser framework. After that, startup is fast.
 
 Omit `--prompt` to open a multiline editor. Type your task, then hit Esc+Enter to submit.
 
@@ -38,8 +39,8 @@ Omit `--prompt` to open a multiline editor. Type your task, then hit Esc+Enter t
 - macOS or Linux
 - Python 3.11+
 - Docker (for SearXNG)
-- `OPENROUTER_API_KEY` environment variable
-- Optional: `TWOCAPTCHA_API_KEY` for automated captcha solving
+- An OpenRouter API key. Get one at [openrouter.ai/keys](https://openrouter.ai/keys). First run prompts for it and saves it to `~/.dtt/env`, or export `OPENROUTER_API_KEY` in your shell to skip the prompt.
+- Optional: a 2Captcha API key for automated captcha solving during browser tasks. First-run setup prompts for this too, or export `TWOCAPTCHA_API_KEY`.
 
 Everything else is installed automatically into `/tmp/dothething` on first run.
 
@@ -141,7 +142,9 @@ The agent discovers and uses all tools exposed by connected MCP servers.
 
 | Path | What's there |
 |---|---|
+| `~/.dtt/env` | Saved OpenRouter + optional 2Captcha API keys (mode 0600). Edit or delete to reset. |
 | `~/.dtt/threads/` | Saved conversation threads (resume with `--resume`) |
+| `~/.dtt/threads/<id>/cache/` | Per-thread scratch folder (intermediate files, downloads, batch artifacts) |
 | `~/.dtt/skills/<name>/SKILL.md` | User-defined skills (Claude Code convention) |
 | `~/.dtt/mcp.json` | MCP server configuration |
 | `/tmp/dothething/` | Runtime: Python venv, SearXNG, Camoufox browser |
