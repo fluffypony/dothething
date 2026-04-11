@@ -57,15 +57,19 @@
       ],
       "featureList": [
         "Autonomous task planning and execution",
-        "Web search via self-hosted SearXNG",
-        "Browser automation with Notte and Camoufox stealth Firefox",
+        "Web search via self-hosted SearXNG with engine targeting",
+        "Browser automation via Notte and Camoufox stealth Firefox",
+        "Interactive browser agent for multi-step flows (browser_agent)",
         "File operations with fuzzy search/replace editing",
-        "Shell command execution",
+        "Shell command execution plus sandboxed Python/Bash/TypeScript",
         "Vision analysis via Claude Sonnet",
         "GPT-5.4 oracle for second opinions",
         "Thread persistence and resume",
         "Live cost tracking per model",
-        "Context window management via result_mode summarization"
+        "Context window management via result_mode summarization",
+        "Prompt caching (OpenRouter sticky routing, Anthropic block-level)",
+        "Custom skills following Claude Code SKILL.md convention",
+        "MCP server integration via ~/.dtt/mcp.json"
       ]
     },
     {
@@ -648,21 +652,25 @@
 
             <div class="col-8 col-padded" vid="93">
                 <div class="meta-heading" vid="94">SEC 02 // CORE MECHANICS</div>
-                <div class="grid" style="gap: 2rem;" vid="95">
-                    <div class="col-6" vid="96">
-                        <ul class="feature-list" vid="97">
-                            <li vid="98"><strong vid="99">Workflow Architecture</strong>
+                <div class="grid" style="gap: 2rem;">
+                    <div class="col-6">
+                        <ul class="feature-list">
+                            <li><strong>Workflow Architecture</strong>
                             Describe task in plain language → agent drafts numbered plan → executes autonomously → searches web, reads/writes files, runs shell commands → delivers final output.</li>
-                            <li vid="100"><strong vid="101">Result Mode</strong>
-                            Every tool call includes a <code vid="102">result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Sonnet 4.6) for focused summary, preserving context window.</li>
+                            <li><strong>Result Mode</strong>
+                            Every tool call includes a <code>result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Sonnet 4.6) for focused summary, preserving context window.</li>
+                            <li><strong>Browser Automation</strong>
+                            Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to a Sonnet-powered browser agent.</li>
                         </ul>
                     </div>
-                    <div class="col-6" vid="103">
-                        <ul class="feature-list" vid="104">
-                            <li vid="105"><strong vid="106">Thread Persistence</strong>
-                            Sessions save to <code vid="107">~/.dtt/threads/</code> with timestamped IDs. Seamlessly resume via CLI flag <code vid="108">--resume <id vid="109"></id></code>.</li>
-                            <li vid="110"><strong vid="111">Cost Tracking</strong>
-                            Fetches live cost data from OpenRouter post-execution. Prints deterministic breakdown: tokens in/out, reasoning cache, dollar cost.</li>
+                    <div class="col-6">
+                        <ul class="feature-list">
+                            <li><strong>Thread Persistence</strong>
+                            Sessions save to <code>~/.dtt/threads/</code> with timestamped IDs. Pick up where you left off with <code>--resume &lt;id&gt;</code>. Full cost breakdown prints on exit: tokens, cache hits, dollars.</li>
+                            <li><strong>Prompt Caching</strong>
+                            OpenRouter sticky routing plus Anthropic block-level cache controls. Long tasks hit the cache on subsequent turns and input costs drop sharply.</li>
+                            <li><strong>Skills &amp; MCP</strong>
+                            Drop any Claude Code <code>SKILL.md</code> into <code>~/.dtt/skills/&lt;name&gt;/</code>. Skills with <code>allowed-tools</code> inject into the system prompt; others run as isolated Sonnet sub-tasks. MCP servers plug in via <code>~/.dtt/mcp.json</code> (same format as Claude Code).</li>
                         </ul>
                     </div>
                 </div>
@@ -672,42 +680,54 @@
         <section class="grid section-block" vid="112">
             <div class="col-7 col-divider" vid="113">
                 <div class="meta-heading" vid="114">SYS.TOOLS // MODULE REGISTRY</div>
-                <div class="tool-grid" vid="115">
-                    <div class="tool-item" vid="116">
-                        <span class="tool-name" vid="117">file_ops</span>
-                        <div class="tool-desc" vid="118">read_file, write_file, edit_file, batch_read, diff_files</div>
+                <div class="tool-grid">
+                    <div class="tool-item">
+                        <span class="tool-name">file_ops</span>
+                        <div class="tool-desc">read_file, write_file, edit_file, batch_read, diff_files</div>
                     </div>
-                    <div class="tool-item" vid="119">
-                        <span class="tool-name" vid="120">search</span>
-                        <div class="tool-desc" vid="121">glob, list_dir, search_file</div>
+                    <div class="tool-item">
+                        <span class="tool-name">search</span>
+                        <div class="tool-desc">glob, list_dir, search_file</div>
                     </div>
-                    <div class="tool-item" vid="122">
-                        <span class="tool-name" vid="123">shell</span>
-                        <div class="tool-desc" vid="124">run_command</div>
+                    <div class="tool-item">
+                        <span class="tool-name">shell</span>
+                        <div class="tool-desc">run_command, run_code (Python/Bash/TS)</div>
                     </div>
-                    <div class="tool-item" vid="125">
-                        <span class="tool-name" vid="126">web</span>
-                        <div class="tool-desc" vid="127">search_web (SearXNG), fetch_page (browser), http_request</div>
+                    <div class="tool-item">
+                        <span class="tool-name">web</span>
+                        <div class="tool-desc">search_web (SearXNG), fetch_page (Notte), browser_agent, http_request</div>
                     </div>
-                    <div class="tool-item" vid="128">
-                        <span class="tool-name" vid="129">vision</span>
-                        <div class="tool-desc" vid="130">analyze_image</div>
+                    <div class="tool-item">
+                        <span class="tool-name">vision</span>
+                        <div class="tool-desc">analyze_image</div>
                     </div>
-                    <div class="tool-item" vid="131">
-                        <span class="tool-name" vid="132">notes</span>
-                        <div class="tool-desc" vid="133">notes_add, notes_read, notes_clear</div>
+                    <div class="tool-item">
+                        <span class="tool-name">oracle</span>
+                        <div class="tool-desc">GPT-5.4 second opinion for the hard calls.</div>
                     </div>
-                    <div class="tool-item" vid="134">
-                        <span class="tool-name" vid="135">planning</span>
-                        <div class="tool-desc" vid="136">plan_create, plan_remaining, plan_update</div>
+                    <div class="tool-item">
+                        <span class="tool-name">notes</span>
+                        <div class="tool-desc">notes_add, notes_read, notes_clear</div>
                     </div>
-                    <div class="tool-item" vid="137">
-                        <span class="tool-name" vid="138">delegate</span>
-                        <div class="tool-desc" vid="139">Farm out sub-tasks to instances.</div>
+                    <div class="tool-item">
+                        <span class="tool-name">planning</span>
+                        <div class="tool-desc">plan_create, plan_remaining, plan_update</div>
                     </div>
-                    <div class="tool-item" vid="140">
-                        <span class="tool-name" vid="141">think</span>
-                        <div class="tool-desc" vid="142">Internal reasoning scratchpad.</div>
+                    <div class="tool-item">
+                        <span class="tool-name">delegate</span>
+                        <div class="tool-desc">Farm sub-tasks to cheaper Sonnet workers.</div>
+                    </div>
+                    <div class="tool-item">
+                        <span class="tool-name">skills</span>
+                        <div class="tool-desc">use_skill. Loads ~/.dtt/skills/&lt;name&gt;/SKILL.md (Claude Code format).</div>
+                    </div>
+                    <div class="tool-item">
+                        <span class="tool-name">mcp</span>
+                        <div class="tool-desc">Any Claude Code MCP server via ~/.dtt/mcp.json.</div>
+                    </div>
+                    <div class="tool-item">
+                        <span class="tool-name">batch</span>
+                        <div class="tool-desc">batch_process, analyze_data. Parallel Sonnet workers for bulk jobs.</div>
                     </div>
                 </div>
             </div>
@@ -723,6 +743,8 @@
                         <tr vid="159"><td class="col-key" vid="160">--resume ID</td><td class="col-val" vid="161">Load thread from ~/.dtt/threads/</td></tr>
                         <tr vid="162"><td class="col-key" vid="163">--max-loops N</td><td class="col-val" vid="164">Limit iteration cycles.</td></tr>
                         <tr vid="165"><td class="col-key" vid="166">--verbose</td><td class="col-val" vid="167">Stream raw thought process.</td></tr>
+                        <tr><td class="col-key">--headed</td><td class="col-val">Show the browser window for visual debug.</td></tr>
+                        <tr><td class="col-key">--debug</td><td class="col-val">Log raw API payloads and cache metrics.</td></tr>
                     </tbody>
                 </table>
             </div>
