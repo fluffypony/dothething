@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="1.1.1"
+DTT_VERSION="1.1.2"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -13,30 +13,44 @@ BASE="/tmp/dothething"
 VENV="$BASE/venv"
 
 # ── Auto-update ─────────────────────────────────────────────────
+# dtt_update [force]   — when force=1, bypass the 6h rate-limit and print status
 dtt_update() (
     set +eu
+    force="${1:-0}"
     check_file="$HOME/.dtt/last-update"
     mkdir -p "$HOME/.dtt"
 
     now=$(date +%s)
-    if [ -f "$check_file" ]; then
+    if [ "$force" != "1" ] && [ -f "$check_file" ]; then
         last=$(cat "$check_file" 2>/dev/null || echo 0)
         [ "$((now - last))" -lt 21600 ] && return 0
     fi
     echo "$now" > "$check_file"
 
     remote=$(curl -sfL --max-time 5 "https://dotheth.ing/VERSION" 2>/dev/null | tr -d '[:space:]')
-    [ -z "$remote" ] && return 0
-    [ "$remote" = "$DTT_VERSION" ] && return 0
+    if [ -z "$remote" ]; then
+        [ "$force" = "1" ] && echo "✗ Could not reach dotheth.ing/VERSION" >&2
+        return 0
+    fi
+    if [ "$remote" = "$DTT_VERSION" ]; then
+        [ "$force" = "1" ] && echo "▸ Already up to date ($DTT_VERSION)" >&2
+        return 0
+    fi
 
     IFS=. read -ra rv <<< "$remote"
     IFS=. read -ra lv <<< "$DTT_VERSION"
     newer=false
     for ((i = 0; i < ${#rv[@]} || i < ${#lv[@]}; i++)); do
         [ "${rv[i]:-0}" -gt "${lv[i]:-0}" ] 2>/dev/null && { newer=true; break; }
-        [ "${rv[i]:-0}" -lt "${lv[i]:-0}" ] 2>/dev/null && return 0
+        [ "${rv[i]:-0}" -lt "${lv[i]:-0}" ] 2>/dev/null && {
+            [ "$force" = "1" ] && echo "▸ Local version ($DTT_VERSION) is newer than remote ($remote)" >&2
+            return 0
+        }
     done
-    $newer || return 0
+    $newer || {
+        [ "$force" = "1" ] && echo "▸ Local version ($DTT_VERSION) is newer than remote ($remote)" >&2
+        return 0
+    }
 
     echo "▸ Updating dothething: $DTT_VERSION → $remote" >&2
     tmp=$(mktemp "$(dirname "$DTT_SELF")/.dtt_update.XXXXXX")
@@ -56,6 +70,7 @@ dtt_update() (
 )
 
 KEEP_TEMP=false
+FORCE_UPDATE=false
 PASS_ARGS=()
 for arg in "$@"; do
   case "$arg" in
@@ -65,6 +80,13 @@ for arg in "$@"; do
     --headed)
       PASS_ARGS+=("$arg")
       ;;
+    -V|--version)
+      echo "dothething $DTT_VERSION"
+      exit 0
+      ;;
+    --update)
+      FORCE_UPDATE=true
+      ;;
     -h|--help)
       cat <<'HELP'
 dothething — autonomous AI agent | https://dotheth.ing
@@ -72,7 +94,7 @@ dothething — autonomous AI agent | https://dotheth.ing
 Usage:
   ./dtt.sh [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
            [--oraclepro] [--headed] [--verbose] [--debug] [--keep-temp]
-           [--resume THREAD_ID]
+           [--resume THREAD_ID] [--version] [--update]
 
 Flags:
   --fast          Use anthropic/claude-opus-4.6-fast instead of opus
@@ -85,6 +107,8 @@ Flags:
   --verbose       Verbose error traces
   --debug         Debug-level logging of API payloads
   --keep-temp     Keep the temp runtime directory on exit
+  --version, -V   Print the dothething version and exit
+  --update        Force an update check (bypasses the 6h rate limit) and exit
 
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
@@ -99,6 +123,10 @@ HELP
 done
 
 mkdir -p "$BASE"
+if [ "$FORCE_UPDATE" = true ]; then
+    dtt_update 1 || true
+    exit 0
+fi
 dtt_update && _upd=0 || _upd=$?
 if [ "$_upd" -eq 42 ]; then exec "$DTT_SELF" "$@"; fi
 
