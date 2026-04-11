@@ -2526,7 +2526,6 @@ or single: {{"tool": "finalize", "arguments": {{"report": "Done."}}}}
 
 <context>
 Working directory: {cwd}
-Date/time: {datetime}
 Platform: {platform}
 Thread: {thread_id}
 SearXNG: {searxng_info}
@@ -4005,7 +4004,6 @@ class Agent:
 
         sys_prompt = SYSTEM_PROMPT.format(
             cwd=self.cwd,
-            datetime=now.strftime("%Y-%m-%d %H:%M %Z"),
             platform=f"{plat.system()} {plat.machine()}",
             thread_id=thread_id,
             searxng_url=searxng_url,
@@ -4045,9 +4043,15 @@ class Agent:
         if mcp_section:
             sys_prompt += "\n" + mcp_section + "\n"
 
+        # System message is a two-block array: static (cached) + temporal (refreshed per-turn).
+        # cache_control sits on the static block only, so the temporal block can change every
+        # turn without invalidating the prompt cache.
+        static_block = {"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}
+        temporal_block = self._build_temporal_block()
+
         if resume_messages:
             # Resume: replace system prompt with fresh one, keep the rest
-            self.messages = [{"role": "system", "content": [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]}]
+            self.messages = [{"role": "system", "content": [static_block, temporal_block]}]
             for m in resume_messages:
                 if m.get("role") != "system":
                     self.messages.append(m)
@@ -4057,7 +4061,7 @@ class Agent:
             })
         else:
             self.messages = [
-                {"role": "system", "content": [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]},
+                {"role": "system", "content": [static_block, temporal_block]},
                 {"role": "user", "content": prompt},
             ]
 
@@ -4296,8 +4300,33 @@ class Agent:
 
         print("\n  ⚠ Maximum loops reached.", file=sys.stderr)
 
+    # ── Temporal block (live date/time, refreshed per model call) ──
+    def _build_temporal_block(self):
+        now = datetime.now().astimezone()
+        text = (
+            "<current_datetime>\n"
+            f"{now.strftime('%A, %Y-%m-%d %H:%M %Z')}\n"
+            "</current_datetime>"
+        )
+        return {"type": "text", "text": text}
+
+    def _refresh_temporal_block(self):
+        # Rewrite the trailing temporal block in the system message so the model
+        # sees a live wall-clock on every turn. The cache_control sits on the
+        # static block only, so updating this one does not invalidate the cache.
+        if not self.messages:
+            return
+        sysmsg = self.messages[0]
+        if sysmsg.get("role") != "system":
+            return
+        content = sysmsg.get("content")
+        if not isinstance(content, list) or not content:
+            return
+        content[-1] = self._build_temporal_block()
+
     # ── Model call with retry ────────────────────────────────────
     async def _call_model(self, retries=3):
+        self._refresh_temporal_block()
         for attempt in range(retries):
             try:
                 payload = {
