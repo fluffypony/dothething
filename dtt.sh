@@ -2660,6 +2660,7 @@ class Agent:
         self.mcp_manager = MCPManager()
         # For serial-work detection and pre-finalize validation
         self._tool_call_patterns = []
+        self._browser_agent_used = False
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -3858,6 +3859,7 @@ class Agent:
         )
 
     async def _tool_browser_agent(self, task, url=None, max_steps=20, **kw):
+        self._browser_agent_used = True
         max_steps = max(1, min(int(max_steps or 20), 50))
         headed = self.headed
 
@@ -4528,6 +4530,8 @@ class Agent:
             print(f"    {model}: {', '.join(parts)}", file=sys.stderr)
         if not rpt:
             print("    (no stats collected)", file=sys.stderr)
+        if self._browser_agent_used:
+            print("    (Note: browser_agent LLM calls via Notte are not included in this total.)", file=sys.stderr)
         print(f"{'━' * 58}", file=sys.stderr)
 
     # ── Cleanup ──────────────────────────────────────────────────
