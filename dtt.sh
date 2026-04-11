@@ -213,6 +213,32 @@ def _make_headers(api_key):
         "X-Title": "dothething",
     }
 
+_tiktoken_enc = None
+def count_tokens(text):
+    global _tiktoken_enc
+    if _tiktoken_enc is None:
+        try:
+            import tiktoken
+            _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
+        except ImportError:
+            return len(text) // 4
+    return len(_tiktoken_enc.encode(text))
+
+def count_message_tokens(messages):
+    total = 0
+    for m in messages:
+        total += 4
+        content = m.get("content", "")
+        if isinstance(content, str):
+            total += count_tokens(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += count_tokens(part.get("text", ""))
+        if m.get("tool_calls"):
+            total += count_tokens(json.dumps(m["tool_calls"], default=str))
+    return total
+
 # ═══════════════════════════════════════════════════════════════════
 # Spinner
 # ═══════════════════════════════════════════════════════════════════
@@ -356,83 +382,111 @@ class SearXNG:
         return f"http://127.0.0.1:{self.port}" if self.port else None
 
 # ═══════════════════════════════════════════════════════════════════
-# Browser — Camoufox + Readability.js
+# Fetch Cache — short-TTL disk cache for web content
+# ═══════════════════════════════════════════════════════════════════
+class FetchCache:
+    def __init__(self, cache_dir=None, default_ttl=300):
+        self.cache_dir = Path(cache_dir or BASE / "fetch_cache")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.default_ttl = default_ttl
+
+    def _key(self, *parts):
+        raw = "|".join(str(p) for p in parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+    def get(self, *key_parts, ttl=None):
+        k = self._key(*key_parts)
+        path = self.cache_dir / f"{k}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+            if time.time() - data["ts"] > (ttl or self.default_ttl):
+                path.unlink(missing_ok=True)
+                return None
+            return data["content"]
+        except Exception:
+            return None
+
+    def put(self, content, *key_parts):
+        k = self._key(*key_parts)
+        path = self.cache_dir / f"{k}.json"
+        path.write_text(json.dumps({"ts": time.time(), "content": content}))
+
+# ═══════════════════════════════════════════════════════════════════
+# Browser — Notte + Camoufox
 # ═══════════════════════════════════════════════════════════════════
 class Browser:
-    def __init__(self):
-        self._browser = None
-        self._cm = None
-        self._readability_js = None
-        self._lock = asyncio.Lock()
-        self._load_readability()
+    """Notte-backed browser with persistent session, captcha solving, and Camoufox stealth."""
+    CAPTCHA_INDICATORS = [
+        "captcha", "verify you are human", "please verify", "checking your browser",
+        "just a moment", "cloudflare", "challenge-platform", "cf-turnstile",
+        "security check", "are you a robot", "ray id", "attention required",
+        "enable javascript and cookies", "recaptcha", "hcaptcha", "turnstile",
+    ]
 
-    def _load_readability(self):
-        cache = BASE / "Readability.js"
-        if cache.exists() and cache.stat().st_size > 100:
-            self._readability_js = cache.read_text()
-            return
-        # Fallback CDN download
-        for url in [
-            "https://cdn.jsdelivr.net/npm/@mozilla/readability@0.6.2/Readability.js",
-            "https://unpkg.com/@mozilla/readability/Readability.js",
-        ]:
-            try:
-                r = requests.get(url, timeout=15)
-                if r.ok and len(r.text) > 100:
-                    self._readability_js = r.text
-                    cache.write_text(r.text)
-                    return
-            except Exception:
-                pass
+    def __init__(self, headless=True):
+        self._session = None
+        self._lock = asyncio.Lock()
+        self._headless = headless
 
     async def _ensure(self):
         async with self._lock:
-            if self._browser is None:
-                from camoufox.async_api import AsyncCamoufox
-                self._cm = AsyncCamoufox(headless=True, humanize=True)
-                self._browser = await self._cm.__aenter__()
-        return self._browser
+            if self._session is None:
+                import notte
+                self._session = notte.Session(
+                    headless=self._headless,
+                    browser_type="camoufox",
+                    solve_captchas=bool(os.environ.get("TWOCAPTCHA_API_KEY")),
+                    perception_type="fast",
+                )
+                await self._session.__aenter__()
+        return self._session
 
-    async def fetch(self, url, mode="markdown", screenshot_region="above", timeout_ms=45000,
-                    extract_selector=None, wait_for=None):
+    @staticmethod
+    def _looks_like_captcha(text):
+        if not text or len(text) > 5000:
+            return False
+        lower = text.lower()
+        return any(ind in lower for ind in Browser.CAPTCHA_INDICATORS)
+
+    async def fetch(self, url, mode="markdown", screenshot_region="above",
+                    timeout_ms=45000, extract_selector=None, wait_for=None):
         try:
-            browser = await self._ensure()
-            page = await browser.new_page()
+            session = await self._ensure()
         except Exception as e:
             async with self._lock:
-                self._browser = None
-                self._cm = None
+                self._session = None
             return f"Error launching browser: {e}"
         try:
-            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-            await page.wait_for_timeout(1500)
+            result = await session.aexecute(type="goto", url=url)
+            if not result.success:
+                return f"Error navigating to {url}: {result.message}"
 
-            # Dismiss cookie consent banners
+            page = session.window.page
+
+            if wait_for:
+                try:
+                    await page.wait_for_selector(wait_for, timeout=10000)
+                except Exception:
+                    pass
+
             try:
                 await page.evaluate("""() => {
-                    const selectors = [
+                    const sels = [
                         '[class*="cookie"] button[class*="accept"]',
-                        '[class*="cookie"] button[class*="agree"]',
                         '[id*="cookie"] button[class*="accept"]',
-                        '[class*="consent"] button[class*="accept"]',
-                        'button[id*="accept-cookies"]',
                         '.cc-btn.cc-dismiss',
+                        'button[aria-label*="accept"]',
                     ];
-                    for (const sel of selectors) {
-                        const btn = document.querySelector(sel);
+                    for (const s of sels) {
+                        const btn = document.querySelector(s);
                         if (btn) { btn.click(); break; }
                     }
                 }""")
                 await page.wait_for_timeout(500)
             except Exception:
                 pass
-
-            # Wait for specific selector if requested
-            if wait_for:
-                try:
-                    await page.wait_for_selector(wait_for, timeout=10000)
-                except Exception:
-                    pass
 
             if mode == "screenshot":
                 if screenshot_region == "full":
@@ -442,7 +496,7 @@ class Browser:
                     await page.evaluate("(h) => window.scrollTo(0, h)", vp.get("height", 720))
                     await page.wait_for_timeout(500)
                     data = await page.screenshot(full_page=False)
-                else:  # above
+                else:
                     await page.evaluate("() => window.scrollTo(0, 0)")
                     await page.wait_for_timeout(200)
                     data = await page.screenshot(full_page=False)
@@ -450,16 +504,15 @@ class Browser:
                 path = Path(f"screenshot_{ts}.png").absolute()
                 path.write_bytes(data)
                 return json.dumps({
-                    "type": "screenshot",
-                    "url": page.url,
-                    "path": str(path),
-                    "region": screenshot_region,
+                    "type": "screenshot", "url": str(page.url),
+                    "path": str(path), "region": screenshot_region,
                     "size_bytes": len(data),
                 }, ensure_ascii=False, indent=2)
+
             elif mode == "html":
                 return await page.content()
-            else:
-                # Extract specific element if selector provided
+
+            else:  # markdown
                 if extract_selector:
                     try:
                         await page.evaluate(
@@ -471,79 +524,32 @@ class Browser:
                         )
                     except Exception:
                         pass
-                return await self._to_markdown(page)
+
+                markdown = await session.ascrape(only_main_content=True)
+
+                if self._looks_like_captcha(markdown):
+                    if os.environ.get("TWOCAPTCHA_API_KEY"):
+                        try:
+                            await session.aexecute(type="captcha_solve")
+                            markdown = await session.ascrape(only_main_content=True)
+                        except Exception:
+                            pass
+
+                title = await page.title()
+                current_url = page.url
+                return f"# {title}\n\nURL: {current_url}\n\n{markdown or '(empty page)'}"
+
         except Exception as e:
             return f"Error fetching {url}: {e}"
-        finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
-
-    async def _to_markdown(self, page):
-        current_url = page.url
-        title = await page.title()
-
-        # Try Readability.js injection first (from all responses)
-        if self._readability_js:
-            try:
-                await page.add_script_tag(content=self._readability_js)
-                article = await page.evaluate(
-                    """(() => {
-                        try {
-                            const clone = document.cloneNode(true);
-                            const a = new Readability(clone).parse();
-                            if (!a) return null;
-                            return {
-                                title: a.title || '',
-                                byline: a.byline || '',
-                                excerpt: a.excerpt || '',
-                                content: a.content || '',
-                                textContent: a.textContent || ''
-                            };
-                        } catch(e) { return null; }
-                    })()"""
-                )
-                if article and article.get("content"):
-                    from html_to_markdown import convert as to_md
-                    md = to_md(article["content"])
-                    header_bits = []
-                    if article.get("title"):
-                        header_bits.append(f"# {article['title']}")
-                    if article.get("byline"):
-                        header_bits.append(f"Byline: {article['byline']}")
-                    if article.get("excerpt"):
-                        header_bits.append(f"Excerpt: {article['excerpt']}")
-                    header_bits.append(f"URL: {current_url}")
-                    header = "\n\n".join(header_bits)
-                    md = re.sub(r"\n{3,}", "\n\n", md).strip()
-                    return f"{header}\n\n{md}"
-            except Exception:
-                pass
-
-        # Fallback: strip and convert
-        html = await page.content()
-        from bs4 import BeautifulSoup
-        from html_to_markdown import convert as to_md
-        soup = BeautifulSoup(html, "lxml")
-        for tag in soup(
-            ["script","style","header","footer","nav","aside","iframe","noscript","svg"]
-        ):
-            tag.decompose()
-        body = soup.body.decode_contents() if soup.body else str(soup)
-        md = to_md(body)
-        md = re.sub(r"\n{3,}", "\n\n", md).strip()
-        return f"# {title}\n\nURL: {current_url}\n\n{md}"
 
     async def close(self):
         async with self._lock:
-            if self._cm:
+            if self._session:
                 try:
-                    await self._cm.__aexit__(None, None, None)
+                    await self._session.__aexit__(None, None, None)
                 except Exception:
                     pass
-                self._browser = None
-                self._cm = None
+                self._session = None
 
 # ═══════════════════════════════════════════════════════════════════
 # Cost Tracker — background queue that fetches OpenRouter stats
@@ -3670,8 +3676,7 @@ class Agent:
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
         """Compact conversation history when context grows too large."""
-        total_chars = sum(len(json.dumps(m, default=str)) for m in self.messages)
-        estimated_tokens = total_chars // 4
+        estimated_tokens = count_message_tokens(self.messages)
         msg_count = len(self.messages)
 
         if estimated_tokens < 700_000 and msg_count < 500:
@@ -4007,8 +4012,7 @@ class Agent:
                     })
 
             # Context window awareness
-            estimated_chars = sum(len(json.dumps(m, default=str)) for m in self.messages)
-            estimated_tokens = estimated_chars // 3
+            estimated_tokens = count_message_tokens(self.messages)
             if estimated_tokens > 700_000:
                 self.messages.append({
                     "role": "user",
