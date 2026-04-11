@@ -115,6 +115,11 @@ Flags:
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
   TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
+
+On first run (or whenever both are unset and no ~/.dtt/env exists), dtt
+will prompt for these interactively and save them to ~/.dtt/env (mode 0600).
+Delete that file to re-run setup. Env vars in the current shell take
+precedence if OPENROUTER_API_KEY is already set.
 HELP
       exit 0
       ;;
@@ -139,6 +144,62 @@ for required in python3 git; do
   fi
 done
 
+# ── API key config (loaded from ~/.dtt/env or prompted on first run) ────
+DTT_ENV_FILE="$HOME/.dtt/env"
+if [ -f "$DTT_ENV_FILE" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    # shellcheck disable=SC1090
+    . "$DTT_ENV_FILE"
+fi
+
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    if ! [ -t 0 ]; then
+        echo "Error: OPENROUTER_API_KEY is not set and stdin is not a TTY for first-run setup." >&2
+        echo "       Export OPENROUTER_API_KEY, or run dtt once interactively to save it to $DTT_ENV_FILE." >&2
+        exit 1
+    fi
+    mkdir -p "$HOME/.dtt"
+    echo
+    echo "▸ First-run setup: dothething needs API keys."
+    echo
+    echo "  1) OpenRouter API key (required). Grab one at https://openrouter.ai/keys"
+    printf "     key: "
+    IFS= read -r _dtt_or_key
+    if [ -z "$_dtt_or_key" ]; then
+        echo "Error: OpenRouter API key is required." >&2
+        exit 1
+    fi
+    echo
+    echo "  2) 2Captcha API key (optional — unlocks automated captcha solving during browser tasks)."
+    echo "     Grab one at https://2captcha.com, or press Enter to skip."
+    printf "     key: "
+    IFS= read -r _dtt_cap_key
+    echo
+
+    # Save to ~/.dtt/env with 0600 permissions. Uses printf %q for safe shell-escaping.
+    umask 077
+    {
+        echo "# dothething API keys — edit to change, delete to reset (dtt will re-prompt on next run)"
+        printf 'export OPENROUTER_API_KEY=%q\n' "$_dtt_or_key"
+        if [ -n "$_dtt_cap_key" ]; then
+            printf 'export TWOCAPTCHA_API_KEY=%q\n' "$_dtt_cap_key"
+        fi
+    } > "$DTT_ENV_FILE"
+    chmod 600 "$DTT_ENV_FILE"
+    echo "  ✓ Saved to $DTT_ENV_FILE"
+    if [ -z "$_dtt_cap_key" ]; then
+        echo "    (2Captcha unconfigured — captcha solving disabled. Edit $DTT_ENV_FILE later to add it.)"
+    fi
+    echo
+
+    # Export into the current process so the Python agent picks them up
+    export OPENROUTER_API_KEY="$_dtt_or_key"
+    if [ -n "$_dtt_cap_key" ]; then
+        export TWOCAPTCHA_API_KEY="$_dtt_cap_key"
+    fi
+    unset _dtt_or_key _dtt_cap_key
+fi
+
+# Final guard — should never fire if the block above succeeded
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
     echo "Error: OPENROUTER_API_KEY is not set." >&2
     exit 1
