@@ -4532,11 +4532,26 @@ class Agent:
 
             result_mode = args.pop("result_mode", "raw")
 
+            # Build a single-line preview of the call. For think/run_code/etc.
+            # this surfaces the actual topic or first line rather than leaving
+            # the status as a bare `⚡ think`.
             brief = ""
-            for key in ("path", "command", "query", "url", "pattern", "content_query", "question"):
-                if key in args:
-                    brief = str(args[key])[:60]
-                    break
+            for key in ("path", "command", "query", "url", "pattern",
+                        "content_query", "question", "goal", "thought",
+                        "items", "code", "content"):
+                if key not in args or not args[key]:
+                    continue
+                val = args[key]
+                if isinstance(val, list):
+                    extra = f" (+{len(val) - 1} more)" if len(val) > 1 else ""
+                    val = (str(val[0]) if val else "") + extra
+                s = str(val).strip()
+                for line in s.splitlines():
+                    if line.strip():
+                        s = line.strip()
+                        break
+                brief = (s[:69] + "…") if len(s) > 70 else s
+                break
             self.spinner.update(f"⚡ {name}" + (f" → {brief}" if brief else ""))
 
             # MCP tool routing
@@ -4583,8 +4598,9 @@ class Agent:
                 final = final[:150_000] + "\n\n[…truncated at 150K chars]"
 
             tag = "raw" if (not result_mode or result_mode.lower() == "raw") else "sum"
+            tok = count_tokens(final) if isinstance(final, str) else 0
             print(
-                f"  ⚡ {name}" + (f" → {brief}" if brief else "") + f"  [{len(final):,}ch {tag}]",
+                f"  ⚡ {name}" + (f" → {brief}" if brief else "") + f"  [{tok:,} tok {tag}]",
                 file=sys.stderr,
             )
 
