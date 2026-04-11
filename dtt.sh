@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="1.1.2"
+DTT_VERSION="1.1.3"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -169,14 +169,17 @@ if [ ! -f "$BASE/.deps_v6" ]; then
 fi
 
 # ── SearXNG in its own venv ──────────────────────────────────────
-if [ ! -f "$BASE/.searxng_v3" ]; then
+if [ ! -f "$BASE/.searxng_v4" ]; then
     echo "▸ Installing SearXNG (first run — takes 1-2 min)..."
-    [ ! -d "$BASE/searxng" ] && git clone --depth 1 -q https://github.com/searxng/searxng.git "$BASE/searxng"
+    # v4 bump: force a fresh clone so earlier versions that trampled
+    # searx/settings.yml get a clean default back.
+    rm -rf "$BASE/searxng"
+    git clone --depth 1 -q https://github.com/searxng/searxng.git "$BASE/searxng"
     [ ! -f "$BASE/searxng_venv/bin/activate" ] && python3 -m venv "$BASE/searxng_venv"
     "$BASE/searxng_venv/bin/pip" install -q -U pip setuptools wheel pyyaml msgspec typing_extensions 2>/dev/null
     "$BASE/searxng_venv/bin/pip" install -q pdm 2>/dev/null || true
     "$BASE/searxng_venv/bin/pip" install -q --use-pep517 --no-build-isolation -e "$BASE/searxng" 2>/dev/null
-    touch "$BASE/.searxng_v3"
+    touch "$BASE/.searxng_v4"
 fi
 
 # ── Notte browser framework ────────────────────────────────────
@@ -363,8 +366,12 @@ class SearXNG:
             ],
         }
 
-        settings_path = src / "searx" / "settings.yml"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        # IMPORTANT: write our override to a file OUTSIDE the searxng source tree.
+        # Previously we wrote into `src/searx/settings.yml`, which IS the defaults
+        # file that `use_default_settings: true` is supposed to merge against —
+        # so we destroyed the very defaults we were trying to extend. Keep the
+        # defaults intact and point SEARXNG_SETTINGS_PATH at a separate file.
+        settings_path = BASE / "searxng_user_settings.yml"
         self.settings_path = settings_path
         with open(self.settings_path, "w") as f:
             yaml.dump(cfg, f)
