@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="1.1.3"
+DTT_VERSION="1.1.4"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -102,7 +102,9 @@ Flags:
   --cwd DIR       Working directory for relative paths (default: .)
   --max-loops N   Maximum agent loop iterations (default: 200)
   --oraclepro     Use openai/gpt-5.4-pro for oracle (default: openai/gpt-5.4)
-  --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/)
+  --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/).
+                  Combine with --prompt or positional text, or just let the
+                  editor open, to supply fresh instructions on resume.
   --headed        Show the browser window for visual debugging
   --verbose       Verbose error traces
   --debug         Debug-level logging of API payloads
@@ -4101,31 +4103,59 @@ class Agent:
         temporal_block = self._build_temporal_block()
 
         if resume_messages:
-            # Resume: replace system prompt with fresh one, keep the rest
+            # Resume: replace system prompt with fresh one, keep the rest.
             self.messages = [{"role": "system", "content": [static_block, temporal_block]}]
             for m in resume_messages:
                 if m.get("role") != "system":
                     self.messages.append(m)
-            self.messages.append({
-                "role": "user",
-                "content": "[System] Resumed. Continue where you left off. Use plan_remaining to check progress.",
-            })
+            fresh = (prompt or "").strip()
+            if fresh:
+                resume_content = (
+                    "[System] Resumed. The user has provided additional "
+                    "instructions — treat these as the new priority. Call "
+                    "plan_remaining first to see existing progress, then "
+                    "update the plan to address the following:\n\n"
+                    f"{fresh}"
+                )
+            else:
+                resume_content = (
+                    "[System] Resumed. Continue where you left off. "
+                    "Use plan_remaining to check progress."
+                )
+            self.messages.append({"role": "user", "content": resume_content})
         else:
             self.messages = [
                 {"role": "system", "content": [static_block, temporal_block]},
                 {"role": "user", "content": prompt},
             ]
 
-        # Save initial state
+        # Save initial state. On resume, preserve the original prompt in meta
+        # (and record the fresh instructions separately) so subsequent resumes
+        # can still show the original task.
         if self.thread_logger:
-            self.thread_logger.save_meta({
-                "model": self.model,
-                "oracle_model": self.oracle_model,
-                "cwd": str(self.cwd),
-                "prompt": prompt,
-                "started_at": now.isoformat(),
-                "thread_id": thread_id,
-            })
+            if resume_messages:
+                existing_meta = self.thread_logger.load_meta() or {}
+                existing_meta.setdefault("model", self.model)
+                existing_meta.setdefault("oracle_model", self.oracle_model)
+                existing_meta.setdefault("cwd", str(self.cwd))
+                existing_meta.setdefault("thread_id", thread_id)
+                existing_meta["resumed_at"] = now.isoformat()
+                fresh = (prompt or "").strip()
+                if fresh:
+                    existing_meta.setdefault("resume_history", []).append({
+                        "at": now.isoformat(),
+                        "prompt": fresh,
+                    })
+                self.thread_logger.save_meta(existing_meta)
+            else:
+                self.thread_logger.save_meta({
+                    "model": self.model,
+                    "oracle_model": self.oracle_model,
+                    "cwd": str(self.cwd),
+                    "prompt": prompt,
+                    "started_at": now.isoformat(),
+                    "thread_id": thread_id,
+                })
             self.thread_logger.save_messages(self.messages)
 
         nudge_count = 0
@@ -4738,7 +4768,7 @@ def main():
     parser.add_argument("--prompt", type=str, default=None, help="Inline prompt text")
     parser.add_argument("--cwd", type=str, default=".", help="Working directory for relative paths")
     parser.add_argument("--max-loops", type=int, default=MAX_LOOPS, help=f"Maximum agent loops (default: {MAX_LOOPS})")
-    parser.add_argument("--resume", type=str, default=None, metavar="THREAD_ID", help="Resume a previous thread")
+    parser.add_argument("--resume", type=str, default=None, metavar="THREAD_ID", help="Resume a previous thread (optionally combine with --prompt or positional text for fresh instructions)")
     parser.add_argument("--headed", action="store_true", help="Show the browser window for visual debugging")
     parser.add_argument("--verbose", action="store_true", help="Verbose error traces")
     parser.add_argument("--debug", action="store_true", help="Debug-level API payload logging")
@@ -4754,18 +4784,24 @@ def main():
     oracle_model = ORACLE_PRO if args.oraclepro else ORACLE_DEFAULT
     cwd = str(Path(args.cwd).expanduser().resolve())
 
-    if args.resume:
-        prompt = "(resumed)"
-    elif args.prompt:
+    if args.prompt:
         prompt = args.prompt
     elif args.positional_prompt:
         prompt = " ".join(args.positional_prompt)
-    elif sys.stdin.isatty():
+    elif not sys.stdin.isatty():
+        prompt = sys.stdin.read()
+    elif args.resume:
+        # On resume, prompting is optional — empty submit means "just continue".
+        print(f"\n  ⟳ Resuming thread: {args.resume}", file=sys.stderr)
+        print(
+            "    Enter additional instructions (optional). Submit empty to continue where you left off.",
+            file=sys.stderr,
+        )
         prompt = read_prompt_interactive()
     else:
-        prompt = sys.stdin.read()
+        prompt = read_prompt_interactive()
 
-    prompt = prompt.strip()
+    prompt = (prompt or "").strip()
     if not prompt and not args.resume:
         print("Error: Empty prompt.", file=sys.stderr)
         sys.exit(1)
