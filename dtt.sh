@@ -2317,11 +2317,19 @@ context lines are error-prone. Prefer search_replace or line_range.
 - run_command: result_mode="did tests pass, which failed and why" not "raw" \
 for long outputs. Write scripts for complex logic rather than long one-liners.
 - search_web: craft queries like a human would. 3-6 keywords. Add year for \
-recency. Use categories for news/science/it. Use time_range for freshness.
-- fetch_page: markdown mode uses Readability.js for clean extraction — best \
-for articles/docs. Use mode="text" for fast fetches that don't need JS. Use \
-screenshot mode for visually complex pages, then analyze_image to understand \
-what you see.
+recency. Use categories='images' for image search, categories='news' for news. \
+Use engines='google,bing' to target specific providers, engines='google scholar' \
+for academic search. Use time_range for freshness.
+- fetch_page: markdown mode uses Notte's built-in content extractor for clean \
+article extraction. Includes automatic captcha detection and solving. Use \
+mode="text" for fast lightweight fetches without browser rendering. Use \
+mode="screenshot" + analyze_image for visual content. DO NOT use for interactive \
+tasks — use browser_agent for those.
+- browser_agent: Hands a goal to an autonomous browser agent (Notte + Camoufox \
++ Sonnet 4.6). Use for multi-step web interactions: filling forms, login flows, \
+navigating SPAs, clicking through menus, handling CAPTCHAs that auto-solving \
+can't handle. More expensive than fetch_page (uses Sonnet for each step). \
+DO NOT use for simple page reads.
 - glob: use ** for recursive. Returns file metadata (size, count).
 - http_request: use for REST APIs, JSON endpoints, file downloads, POST \
 requests — NOT for human-readable web pages (use fetch_page for those).
@@ -2349,8 +2357,11 @@ over 200K chars. Use output_file to write results directly to disk.
 - delegate: Now supports input_file parameter to pass file contents as context. \
 Use for file-based text processing, extraction, reformatting. For very large files \
 prefer analyze_data which supports chunking.
-- use_skill: Invoke pre-defined skills from ~/.dtt/skills/. Skills are run via \
-Sonnet in isolated context — only summarized results return to your conversation.
+- use_skill: Invoke with mode='read' to load a skill's full instructions into \
+your context (you then execute the steps yourself with your tools). Use \
+mode='delegate' to run a text-processing skill as an isolated Sonnet sub-task. \
+Skills marked as inline in the system prompt are already active — follow their \
+instructions directly without invoking use_skill.
 - batch_process: THE tool for massive parallel workloads. Give it a file of items \
 and an instruction template, and it fans out to Sonnet in parallel. 800 items in \
 one tool call instead of 800 agent turns. Use enrich_with_search to auto-research \
@@ -2510,7 +2521,10 @@ Date/time: {datetime}
 Platform: {platform}
 Thread: {thread_id}
 SearXNG: {searxng_info}
-Camoufox: Available via fetch_page and as Python library for scripted use
+Notte: Browser framework with stealth Camoufox, content extraction, and captcha solving.
+  - fetch_page for deterministic scraping (no LLM cost)
+  - browser_agent for interactive multi-step browsing (uses Sonnet 4.6)
+  - Available as Python library: import notte
 Python venv: {venv_path}
 </context>
 
@@ -2520,28 +2534,44 @@ You have these local services running:
 1. SEARXNG (Local Search Engine):
    - URL: {searxng_url}
    - JSON API: GET {searxng_url}/search?q=QUERY&format=json&categories=general
-   - Supports params: q, format, categories, time_range (day|month|year), language, pageno
+   - Supports params: q, format, categories, time_range (day|week|month|year), \
+language, pageno, engines
+   - Categories: general, images, videos, news, science, files, it, social media
+   - Engines: google, bing, duckduckgo, brave, google images, bing images, \
+google news, google scholar, arxiv, github, stackoverflow, wikipedia
+   - Use search_web(categories="images") for image search
+   - Use search_web(engines="google scholar") for academic search
    - You can hit this directly via http_request, run_command (curl), or from scripts \
 you write with run_code
    - For bulk searches (50+ queries), write a Python script that queries SearXNG \
 concurrently using asyncio+httpx rather than calling search_web repeatedly
 
-2. CAMOUFOX (Stealth Browser):
-   - A stealth Firefox fork (anti-fingerprint) used internally by fetch_page
-   - Available as a Python package in the venv for direct scripted use
-   - Import via: from camoufox.async_api import AsyncCamoufox
-   - There is NO separate Camoufox HTTP port — it is a library, not a service
-   - For bulk page fetches, write a Python script using camoufox directly
+2. NOTTE (Browser Agent Framework):
+   - Stealth browser framework with Camoufox (anti-fingerprint Firefox) and captcha solving
+   - Used internally by fetch_page for page fetching and clean content extraction
+   - browser_agent tool gives full interactive browser control via Notte's AI agent
+   - Available as a Python package in the venv for direct scripted use: import notte
+   - For bulk page fetches, write a Python script using notte.Session directly:
+     with notte.Session(headless=True, browser_type="camoufox") as session:
+         session.execute(type="goto", url="https://example.com")
+         markdown = session.scrape(only_main_content=True)
+   - Set TWOCAPTCHA_API_KEY for automated captcha solving
+   - There is NO separate Notte HTTP port — it is a library, not a service
 
 3. PYTHON ENVIRONMENT:
    - Venv at {venv_path} with pre-installed packages: requests, httpx, \
-beautifulsoup4, lxml, html-to-markdown, pyyaml, Pillow, markitdown, \
-pypdf, python-docx, openpyxl, tabulate, camoufox, playwright
+beautifulsoup4, lxml, pyyaml, Pillow, tiktoken, markitdown, \
+pypdf, python-docx, openpyxl, tabulate, notte
    - All run_code Python scripts automatically use this venv
 
 Environment variables injected into run_code/run_command:
   SEARXNG_URL, DTT_SEARXNG_URL, DTT_SEARXNG_PORT, DTT_CWD, DTT_BASE, \
-DTT_THREAD_ID, DTT_READABILITY_JS
+DTT_THREAD_ID, TWOCAPTCHA_API_KEY (if set), OPENROUTER_API_KEY
+
+For a task requiring form interaction:
+  1. Use fetch_page to read the page first
+  2. If you need to fill forms or click through flows, use browser_agent
+  3. browser_agent returns the final page state when done
 
 For heavy-duty tasks involving many web fetches or searches, prefer writing \
 and executing a Python script (via run_code) that uses these services \
