@@ -6947,6 +6947,7 @@ class OrchestratorApp:
         self.selected_id = None
         self._searxng_url = None
         self._max_workers = 16
+        self._launch_lock = asyncio.Lock()
         self._notify_desktop = notify_desktop
         self._notify_email = notify_email
 
@@ -7125,60 +7126,61 @@ class OrchestratorApp:
                 event.input._mode = "new"
 
             async def _do_launch(self, prompt, label=None, max_loops=None):
-                running = len([s for s in orchestrator.sessions.values() if s["status"] == "running"])
-                if running >= orchestrator._max_workers:
-                    self.notify(f"Worker limit ({orchestrator._max_workers}) reached.", severity="warning")
-                    return
+                async with orchestrator._launch_lock:
+                    running = len([s for s in orchestrator.sessions.values() if s["status"] == "running"])
+                    if running >= orchestrator._max_workers:
+                        self.notify(f"Worker limit ({orchestrator._max_workers}) reached.", severity="warning")
+                        return
 
-                sid = orchestrator.next_id
-                orchestrator.next_id += 1
+                    sid = orchestrator.next_id
+                    orchestrator.next_id += 1
 
-                ctl_fd, control_file = tempfile.mkstemp(suffix=f"_dtt_ctl_{sid}.jsonl")
-                os.close(ctl_fd)
-                os.chmod(control_file, 0o600)
+                    ctl_fd, control_file = tempfile.mkstemp(suffix=f"_dtt_ctl_{sid}.jsonl")
+                    os.close(ctl_fd)
+                    os.chmod(control_file, 0o600)
 
-                cmd = [
-                    sys.executable, str(orchestrator.agent_py_path),
-                    "--_worker", "--_events-jsonl",
-                    "--_control-file", control_file,
-                    "--prompt", prompt,
-                    "--cwd", str(orchestrator.cwd),
-                ]
-                if max_loops:
-                    cmd.extend(["--max-loops", str(max_loops)])
-                if orchestrator._searxng_url:
-                    cmd.extend(["--_searxng-url", orchestrator._searxng_url])
+                    cmd = [
+                        sys.executable, str(orchestrator.agent_py_path),
+                        "--_worker", "--_events-jsonl",
+                        "--_control-file", control_file,
+                        "--prompt", prompt,
+                        "--cwd", str(orchestrator.cwd),
+                    ]
+                    if max_loops:
+                        cmd.extend(["--max-loops", str(max_loops)])
+                    if orchestrator._searxng_url:
+                        cmd.extend(["--_searxng-url", orchestrator._searxng_url])
 
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env={**os.environ, "OPENROUTER_API_KEY": orchestrator.api_key},
-                )
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env={**os.environ, "OPENROUTER_API_KEY": orchestrator.api_key},
+                    )
 
-                session = {
-                    "id": sid,
-                    "prompt": prompt[:80],
-                    "label": label or f"Agent {sid}",
-                    "proc": proc,
-                    "control_file": control_file,
-                    "status": "running",
-                    "phase": "starting",
-                    "cost": 0.0,
-                    "start_time": time.time(),
-                    "log_lines": [],
-                    "final_report": "",
-                    "final_files": [],
-                    "expanded": False,
-                    "done_event": asyncio.Event(),
-                }
-                orchestrator.sessions[sid] = session
+                    session = {
+                        "id": sid,
+                        "prompt": prompt[:80],
+                        "label": label or f"Agent {sid}",
+                        "proc": proc,
+                        "control_file": control_file,
+                        "status": "running",
+                        "phase": "starting",
+                        "cost": 0.0,
+                        "start_time": time.time(),
+                        "log_lines": [],
+                        "final_report": "",
+                        "final_files": [],
+                        "expanded": False,
+                        "done_event": asyncio.Event(),
+                    }
+                    orchestrator.sessions[sid] = session
 
-                table = self.query_one(DataTable)
-                table.add_row(
-                    str(sid), "running", "starting", "0s", "$0.00", prompt[:60],
-                    key=str(sid)
-                )
+                    table = self.query_one(DataTable)
+                    table.add_row(
+                        str(sid), "running", "starting", "0s", "$0.00", prompt[:60],
+                        key=str(sid)
+                    )
 
                 asyncio.create_task(self._monitor_session(sid))
                 # Drain stderr to prevent pipe buffer deadlock
@@ -7226,6 +7228,7 @@ class OrchestratorApp:
                         elif event_type == "finalized":
                             session["final_report"] = event.get("report", "")
                             session["final_files"] = event.get("files", [])
+                            session["final_status"] = event.get("status", "")
                             session["phase"] = "finalized"
                         elif event_type == "cost":
                             session["cost"] = event.get("total", 0)
@@ -7300,7 +7303,8 @@ class OrchestratorApp:
                 session = orchestrator.sessions[sid]
                 await session["done_event"].wait()
 
-                status = session["status"]
+                # Prefer agent-level status (complete/partial/terminated) over process-level (done/failed)
+                status = session.get("final_status") or session["status"]
                 report = session.get("final_report", "")
                 files = session.get("final_files", [])
                 cost = session.get("cost", 0)
@@ -7361,6 +7365,8 @@ class OrchestratorApp:
                             output = output[:100000] + "\n... (truncated)"
                         return output if output else "(no output)"
                     except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
                         return "Error: command timed out after 120s"
                     except Exception as e:
                         return f"Error running command: {e}"
