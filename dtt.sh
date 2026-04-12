@@ -3908,6 +3908,8 @@ class Agent:
         self._final_files = files or []
         self._final_sources = sources or []
         self._final_status = status or "complete"
+        self.events.emit("finalized", status=self._final_status, report=report,
+                         files=self._final_files)
         return report
 
     # ── New tool implementations ───────────────────────────────
@@ -5922,6 +5924,7 @@ class Agent:
     def _show_cost_report(self):
         rpt = self.cost_tracker.report()
         total = self.cost_tracker.total_cost
+        self.events.emit("cost", total=total)
         print(f"\n{'━' * 58}", file=sys.stderr)
         print(f"  Session cost: ${total:.4f}", file=sys.stderr)
         for model, d in sorted(rpt.items()):
@@ -5942,6 +5945,7 @@ class Agent:
     async def cleanup(self):
         self.input_handler.stop()
         self.spinner.stop()
+        self.events.emit("exit", code=0 if self._finalized else 1)
         print("\n  ⏳ Cleaning up…", file=sys.stderr)
         self.searxng.stop()
         await self.browser.close()
@@ -6001,8 +6005,31 @@ def read_prompt_interactive():
 
 
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
-                    debug, verbose, headed=False, resume_id=None):
+                    debug, verbose, headed=False, resume_id=None, worker_mode=False):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
+
+    # Worker mode: emit JSONL events to stdout for orchestrator consumption
+    if worker_mode:
+        agent.spinner = Spinner(enabled=False)
+        agent.input_handler = InputHandler(agent)
+        agent.input_handler.enabled = False
+        def _jsonl_handler(event, **data):
+            payload = {"event": event, "ts": time.time()}
+            payload.update({k: str(v) if not isinstance(v, (int, float, bool, type(None))) else v for k, v in data.items()})
+            try:
+                sys.stdout.write(json.dumps(payload, default=str) + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+        agent.events.on("turn_start", _jsonl_handler)
+        agent.events.on("model_start", _jsonl_handler)
+        agent.events.on("model_end", _jsonl_handler)
+        agent.events.on("tool_start", _jsonl_handler)
+        agent.events.on("tool_end", _jsonl_handler)
+        agent.events.on("status", _jsonl_handler)
+        agent.events.on("finalized", _jsonl_handler)
+        agent.events.on("cost", _jsonl_handler)
+        agent.events.on("error", _jsonl_handler)
 
     if resume_id:
         agent.thread_logger = ThreadLogger(thread_id=resume_id)
@@ -6050,6 +6077,410 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Orchestrator Mode — Textual TUI for managing parallel agents
+# ═══════════════════════════════════════════════════════════════════
+ORCHESTRATOR_SYSTEM_PROMPT = """\
+You are the DTT Orchestrator Smart Launcher. Your job is to decompose a user's \
+high-level task into independent sub-tasks and launch worker agents for each.
+
+You have one tool: launch_agent.
+
+Rules:
+- Each launched agent runs independently with no shared state. Include ALL context \
+each agent needs in its prompt.
+- Prefer batches of 5-15 items per agent over one-per-item for large datasets.
+- For simple row-wise transforms on a CSV, prefer fewer agents with chunked batches \
+rather than one agent per row.
+- Always include expected output format and acceptance criteria in each sub-prompt.
+- Include a stop condition in each sub-prompt.
+- Cap total agents at {max_workers}. If more parallelism is needed, batch items.
+
+When you are done launching, output a summary of what you launched."""
+
+
+class OrchestratorApp:
+    """TUI for managing multiple DTT agent sessions using Textual."""
+
+    def __init__(self, api_key, model, cwd, agent_py_path):
+        self.api_key = api_key
+        self.model = model
+        self.cwd = cwd
+        self.agent_py_path = agent_py_path
+        self.sessions = {}
+        self.next_id = 1
+        self.selected_id = None
+        self._searxng_url = None
+        self._max_workers = 16
+
+    def run(self):
+        """Run the orchestrator using Textual TUI."""
+        try:
+            from textual.app import App, ComposeResult
+            from textual.widgets import Header, Footer, DataTable, Input, RichLog, Static
+            from textual.binding import Binding
+        except ImportError:
+            print("Error: textual package not installed. Run: pip install textual", file=sys.stderr)
+            sys.exit(1)
+
+        orchestrator = self
+
+        class OrchestratorTUI(App):
+            CSS = """
+            DataTable { height: 1fr; }
+            RichLog { height: 1fr; border: solid green; display: none; }
+            RichLog.visible { display: block; }
+            Input { dock: bottom; }
+            """
+
+            BINDINGS = [
+                Binding("n", "new_agent", "New Agent", show=True),
+                Binding("s", "smart_launch", "Smart Launch", show=True),
+                Binding("enter", "toggle_expand", "Expand", show=True),
+                Binding("t", "terminate", "Terminate", show=True),
+                Binding("i", "live_input", "Live Input", show=True),
+                Binding("c", "copy_log", "Copy Log", show=True),
+                Binding("o", "copy_output", "Copy Output", show=True),
+                Binding("ctrl+c", "quit", "Quit", show=True),
+            ]
+
+            def compose(self) -> ComposeResult:
+                yield Header(show_clock=True)
+                yield DataTable(id="agents")
+                yield RichLog(id="agent_log", wrap=True)
+                yield Input(placeholder="Press 'n' for new agent, 's' for smart launch...", id="chat")
+                yield Footer()
+
+            def on_mount(self):
+                table = self.query_one(DataTable)
+                table.add_columns("ID", "Status", "Phase", "Elapsed", "Cost", "Prompt")
+                table.cursor_type = "row"
+
+            async def action_new_agent(self):
+                inp = self.query_one(Input)
+                inp.focus()
+                inp.placeholder = "Enter prompt for new agent (press Enter to launch)..."
+                inp.value = ""
+                inp._mode = "new"
+
+            async def action_smart_launch(self):
+                inp = self.query_one(Input)
+                inp.focus()
+                inp.placeholder = "Enter meta-prompt for smart launcher..."
+                inp.value = ""
+                inp._mode = "smart"
+
+            async def action_toggle_expand(self):
+                table = self.query_one(DataTable)
+                row_key = table.cursor_row
+                if row_key is None:
+                    return
+                try:
+                    sid = int(table.get_row_at(row_key)[0])
+                except (ValueError, IndexError):
+                    return
+                session = orchestrator.sessions.get(sid)
+                if not session:
+                    return
+                session["expanded"] = not session["expanded"]
+                log_widget = self.query_one(RichLog)
+                if session["expanded"]:
+                    orchestrator.selected_id = sid
+                    log_widget.add_class("visible")
+                    log_widget.clear()
+                    for line in session["log_lines"][-100:]:
+                        log_widget.write(line)
+                else:
+                    log_widget.remove_class("visible")
+
+            async def action_terminate(self):
+                table = self.query_one(DataTable)
+                row_key = table.cursor_row
+                if row_key is None:
+                    return
+                try:
+                    sid = int(table.get_row_at(row_key)[0])
+                except (ValueError, IndexError):
+                    return
+                session = orchestrator.sessions.get(sid)
+                if session and session["proc"]:
+                    session["proc"].terminate()
+                    session["status"] = "terminated"
+                    orchestrator._send_control(sid, "terminate")
+                    table.update_cell_at((row_key, 1), "terminated")
+
+            async def action_live_input(self):
+                table = self.query_one(DataTable)
+                row_key = table.cursor_row
+                if row_key is None:
+                    self.notify("Select an agent first.", severity="warning")
+                    return
+                try:
+                    sid = int(table.get_row_at(row_key)[0])
+                except (ValueError, IndexError):
+                    return
+                inp = self.query_one(Input)
+                inp.focus()
+                inp.placeholder = f"Live input to Agent {sid}..."
+                inp.value = ""
+                inp._mode = f"live:{sid}"
+
+            async def action_copy_log(self):
+                table = self.query_one(DataTable)
+                row_key = table.cursor_row
+                if row_key is None:
+                    return
+                try:
+                    sid = int(table.get_row_at(row_key)[0])
+                except (ValueError, IndexError):
+                    return
+                session = orchestrator.sessions.get(sid)
+                if session:
+                    full_log = "\n".join(session["log_lines"])
+                    try:
+                        _clipboard_copy_text(full_log)
+                        self.notify("Log copied to clipboard.")
+                    except Exception as e:
+                        self.notify(f"Copy failed: {e}", severity="error")
+
+            async def action_copy_output(self):
+                table = self.query_one(DataTable)
+                row_key = table.cursor_row
+                if row_key is None:
+                    return
+                try:
+                    sid = int(table.get_row_at(row_key)[0])
+                except (ValueError, IndexError):
+                    return
+                session = orchestrator.sessions.get(sid)
+                if session:
+                    output = session.get("final_report", "")
+                    try:
+                        _clipboard_copy_text(output)
+                        self.notify("Output copied to clipboard.")
+                    except Exception as e:
+                        self.notify(f"Copy failed: {e}", severity="error")
+
+            async def on_input_submitted(self, event):
+                text = event.value.strip()
+                event.input.value = ""
+                if not text:
+                    return
+
+                mode = getattr(event.input, '_mode', 'new')
+
+                if mode == "smart":
+                    await self._do_smart_launch(text)
+                elif mode.startswith("live:"):
+                    sid = int(mode.split(":")[1])
+                    orchestrator._send_control(sid, "live_input", text)
+                    self.notify(f"Live input sent to Agent {sid}")
+                else:
+                    await self._do_launch(text)
+
+                event.input.placeholder = "Press 'n' for new agent, 's' for smart launch..."
+                event.input._mode = "new"
+
+            async def _do_launch(self, prompt, label=None, max_loops=None):
+                running = len([s for s in orchestrator.sessions.values() if s["status"] == "running"])
+                if running >= orchestrator._max_workers:
+                    self.notify(f"Worker limit ({orchestrator._max_workers}) reached.", severity="warning")
+                    return
+
+                sid = orchestrator.next_id
+                orchestrator.next_id += 1
+
+                control_file = tempfile.mktemp(suffix=f"_dtt_ctl_{sid}.jsonl")
+
+                cmd = [
+                    sys.executable, str(orchestrator.agent_py_path),
+                    "--_worker", "--_events-jsonl",
+                    "--_control-file", control_file,
+                    "--prompt", prompt,
+                    "--cwd", str(orchestrator.cwd),
+                ]
+                if max_loops:
+                    cmd.extend(["--max-loops", str(max_loops)])
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, "OPENROUTER_API_KEY": orchestrator.api_key},
+                )
+
+                session = {
+                    "id": sid,
+                    "prompt": prompt[:80],
+                    "label": label or f"Agent {sid}",
+                    "proc": proc,
+                    "control_file": control_file,
+                    "status": "running",
+                    "phase": "starting",
+                    "cost": 0.0,
+                    "start_time": time.time(),
+                    "log_lines": [],
+                    "final_report": "",
+                    "final_files": [],
+                    "expanded": False,
+                }
+                orchestrator.sessions[sid] = session
+
+                table = self.query_one(DataTable)
+                table.add_row(
+                    str(sid), "running", "starting", "0s", "$0.00", prompt[:60],
+                    key=str(sid)
+                )
+
+                asyncio.create_task(self._monitor_session(sid))
+                return sid
+
+            async def _monitor_session(self, sid):
+                session = orchestrator.sessions[sid]
+                proc = session["proc"]
+                table = self.query_one(DataTable)
+                log_widget = self.query_one(RichLog)
+
+                async for line in proc.stdout:
+                    decoded = line.decode(errors="replace").strip()
+                    if not decoded:
+                        continue
+
+                    session["log_lines"].append(decoded)
+
+                    try:
+                        event = json.loads(decoded)
+                        event_type = event.get("event", "")
+
+                        if event_type == "status":
+                            session["phase"] = event.get("phase", "")
+                        elif event_type == "final":
+                            session["final_report"] = event.get("report", "")
+                            session["final_files"] = event.get("files", [])
+                        elif event_type == "cost":
+                            session["cost"] = event.get("total", 0)
+                        elif event_type == "exit":
+                            session["status"] = "done" if event.get("code", 1) == 0 else "failed"
+                    except json.JSONDecodeError:
+                        pass
+
+                    elapsed = int(time.time() - session["start_time"])
+                    try:
+                        table.update_cell(str(sid), "Status", session["status"])
+                        table.update_cell(str(sid), "Phase", session["phase"])
+                        table.update_cell(str(sid), "Elapsed", f"{elapsed}s")
+                        table.update_cell(str(sid), "Cost", f"${session['cost']:.2f}")
+                    except Exception:
+                        pass
+
+                    if session.get("expanded") and orchestrator.selected_id == sid:
+                        log_widget.write(decoded)
+
+                await proc.wait()
+                if session["status"] == "running":
+                    session["status"] = "done" if proc.returncode == 0 else "failed"
+                    try:
+                        table.update_cell(str(sid), "Status", session["status"])
+                    except Exception:
+                        pass
+
+            async def _do_smart_launch(self, meta_prompt):
+                self.notify("Smart launcher processing...", severity="information")
+                tools = [{
+                    "type": "function",
+                    "function": {
+                        "name": "launch_agent",
+                        "description": "Launch a new autonomous DTT agent with the given prompt.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {"type": "string", "description": "Complete, self-contained task prompt"},
+                                "label": {"type": "string", "description": "Short label for the session"},
+                                "max_loops": {"type": "integer", "description": "Max turns (optional, default 200)"},
+                                "estimated_turns": {"type": "integer", "description": "Your estimate of turns needed"},
+                            },
+                            "required": ["prompt"],
+                        },
+                    },
+                }]
+
+                try:
+                    async with httpx.AsyncClient(timeout=300) as client:
+                        resp = await client.post(
+                            OPENROUTER_URL,
+                            headers=_make_headers(orchestrator.api_key),
+                            json={
+                                "model": OPUS,
+                                "messages": [
+                                    {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT.format(
+                                        max_workers=orchestrator._max_workers
+                                    )},
+                                    {"role": "user", "content": meta_prompt},
+                                ],
+                                "tools": tools,
+                                "tool_choice": "auto",
+                                "temperature": 0.2,
+                                "max_tokens": 16384,
+                            },
+                        )
+                        data = resp.json()
+
+                    launches = []
+                    for choice in data.get("choices", []):
+                        msg = choice.get("message", {})
+                        for tc in msg.get("tool_calls", []):
+                            if tc["function"]["name"] == "launch_agent":
+                                try:
+                                    launch_args = json.loads(tc["function"]["arguments"])
+                                    launches.append(launch_args)
+                                except json.JSONDecodeError:
+                                    pass
+
+                    if not launches:
+                        self.notify("Smart launcher did not produce any agents.", severity="warning")
+                        return
+
+                    total_est_turns = sum(l.get("estimated_turns", 8) for l in launches)
+                    avg_cost = 0.03
+                    est_low = total_est_turns * avg_cost * 0.5
+                    est_high = total_est_turns * avg_cost * 1.5
+
+                    self.notify(
+                        f"Launching {len(launches)} agents (~{total_est_turns} turns, "
+                        f"est. ${est_low:.2f}-${est_high:.2f})",
+                        severity="information"
+                    )
+
+                    if len(launches) > orchestrator._max_workers:
+                        launches = launches[:orchestrator._max_workers]
+
+                    for la in launches:
+                        await self._do_launch(
+                            prompt=la["prompt"],
+                            label=la.get("label"),
+                            max_loops=la.get("max_loops"),
+                        )
+                except Exception as e:
+                    self.notify(f"Smart launcher error: {e}", severity="error")
+
+        tui = OrchestratorTUI()
+        tui.title = "dothething orchestrator"
+        tui.run()
+
+    def _send_control(self, sid, action, text=None):
+        session = self.sessions.get(sid)
+        if not session:
+            return
+        msg = {"action": action}
+        if text:
+            msg["text"] = text
+        try:
+            with open(session["control_file"], "a") as f:
+                f.write(json.dumps(msg) + "\n")
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="dothething",
@@ -6065,6 +6496,13 @@ def main():
     parser.add_argument("--headed", action="store_true", help="Show the browser window for visual debugging")
     parser.add_argument("--verbose", action="store_true", help="Verbose error traces")
     parser.add_argument("--debug", action="store_true", help="Debug-level API payload logging")
+    parser.add_argument("--orchestrator", action="store_true", help="Launch orchestrator mode (manage multiple parallel agents)")
+    # Hidden worker-mode flags (used by orchestrator to spawn child agents)
+    parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--_events-jsonl", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--_control-file", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--_label", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--_searxng-url", type=str, help=argparse.SUPPRESS)
     parser.add_argument("positional_prompt", nargs="*", help="Task prompt (omit for interactive editor)")
     args = parser.parse_args()
 
@@ -6076,6 +6514,19 @@ def main():
     model = OPUS_FAST if args.fast else OPUS
     oracle_model = ORACLE_PRO if args.oraclepro else ORACLE_DEFAULT
     cwd = str(Path(args.cwd).expanduser().resolve())
+
+    if args.orchestrator:
+        app = OrchestratorApp(
+            api_key=api_key,
+            model=model,
+            cwd=Path(cwd),
+            agent_py_path=Path(__file__).resolve(),
+        )
+        app.run()
+        return
+
+    # Worker mode: output JSONL events to stdout for orchestrator
+    is_worker = getattr(args, '_worker', False)
 
     if args.prompt:
         prompt = args.prompt
@@ -6115,6 +6566,7 @@ def main():
             verbose=args.verbose,
             headed=args.headed,
             resume_id=args.resume,
+            worker_mode=is_worker,
         ))
     except KeyboardInterrupt:
         pass
