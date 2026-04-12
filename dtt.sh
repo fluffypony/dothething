@@ -3350,7 +3350,7 @@ Thread cache: {cache_dir}
   - Per-thread scratch folder that persists across turns and across --resume.
   - Use it for intermediate files, downloaded artifacts, batch inputs/outputs,
     parsed data, screenshots, partial results, anything you might need later.
-  - Prefer this over /tmp, $HOME, or the working directory for temporary files —
+  - Use {cache_dir} over /tmp, $HOME, or the working directory for temporary files —
     /tmp may be wiped, and the working directory is the user's project.
 SearXNG: {searxng_info}
 Notte: Browser framework with stealth Camoufox, content extraction, and captcha solving.
@@ -6087,7 +6087,8 @@ class Agent:
                 }
                 state_path = self.thread_logger.thread_dir / "state.json"
                 try:
-                    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+                    redacted_state = _redact_for_log(state, _collect_secret_values())
+                    state_path.write_text(json.dumps(redacted_state, ensure_ascii=False, indent=2))
                 except Exception:
                     pass
 
@@ -6860,7 +6861,8 @@ When you are done launching, output a summary of what you launched."""
 class OrchestratorApp:
     """TUI for managing multiple DTT agent sessions using Textual."""
 
-    def __init__(self, api_key, model, cwd, agent_py_path):
+    def __init__(self, api_key, model, cwd, agent_py_path,
+                 notify_desktop=False, notify_email=None):
         self.api_key = api_key
         self.model = model
         self.cwd = cwd
@@ -6870,6 +6872,8 @@ class OrchestratorApp:
         self.selected_id = None
         self._searxng_url = None
         self._max_workers = 16
+        self._notify_desktop = notify_desktop
+        self._notify_email = notify_email
 
     def run(self):
         """Run the orchestrator using Textual TUI."""
@@ -7179,6 +7183,36 @@ class OrchestratorApp:
                 except OSError:
                     pass
 
+                # Per-agent notification
+                if orchestrator._notify_desktop:
+                    _send_desktop_notification(
+                        f"dothething: Agent {sid}",
+                        f"{session.get('label', f'Agent {sid}')} — {session['status']} (${session.get('cost', 0):.2f})"
+                    )
+
+                # Check if all sessions are terminal
+                all_done = all(
+                    s["status"] in ("done", "failed", "terminated")
+                    for s in orchestrator.sessions.values()
+                )
+                if all_done and orchestrator.sessions:
+                    total_cost = sum(s.get("cost", 0) for s in orchestrator.sessions.values())
+                    if orchestrator._notify_desktop:
+                        _send_desktop_notification(
+                            "dothething orchestrator — all agents complete",
+                            f"{len(orchestrator.sessions)} agents finished. Total: ${total_cost:.2f}"
+                        )
+                    if orchestrator._notify_email:
+                        agent_summaries = "\n".join(
+                            f"  - {s.get('label', f'Agent {sid}')}: {s['status']} (${s.get('cost', 0):.2f})"
+                            for sid, s in orchestrator.sessions.items()
+                        )
+                        asyncio.create_task(_send_email_notification(
+                            orchestrator._notify_email,
+                            f"dothething orchestrator: all {len(orchestrator.sessions)} agents complete (${total_cost:.2f})",
+                            f"All agents finished.\n\n{agent_summaries}"
+                        ))
+
             async def _do_smart_launch(self, meta_prompt):
                 self.notify("Smart launcher processing...", severity="information")
                 self.run_worker(self._smart_launch_worker(meta_prompt), exclusive=True)
@@ -7337,6 +7371,8 @@ def main():
             model=model,
             cwd=Path(cwd),
             agent_py_path=Path(__file__).resolve(),
+            notify_desktop=getattr(args, 'notify_desktop', False),
+            notify_email=getattr(args, 'notify_email', None),
         )
         app.run()
         return
