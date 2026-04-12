@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="1.4.0"
+DTT_VERSION="1.4.1"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -3173,7 +3173,7 @@ Values are shell-escaped and redacted automatically.
 - manage_skill: Install skills from git repos, URLs, or raw content into ~/.dtt/skills/. \
 Hot-loaded immediately. Uninstall by name.
 - manage_mcp: Add/remove MCP servers from ~/.dtt/mcp.json. MCP secrets are stored in \
-env with ${VAR} placeholders in the config. Hot-reloaded.
+env with ${{VAR}} placeholders in the config. Hot-reloaded.
 - request_user_input: Pause and ask the user a question. Use ONLY when information \
 cannot be obtained any other way (OTP, credential, destructive confirmation). Always \
 phrase with a default action so the agent proceeds if no response.
