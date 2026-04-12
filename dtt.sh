@@ -3388,13 +3388,16 @@ class Agent:
         self.http = httpx.AsyncClient(timeout=1800)
         self.cost_tracker.start(self.http)
 
-        self.spinner.start("Starting SearXNG...")
-        ok = self.searxng.start(self.spinner)
-        self.spinner.stop()
-        if ok:
-            print(f"  ✓ SearXNG on port {self.searxng.port}", file=sys.stderr)
+        if getattr(self, '_skip_searxng_start', False):
+            print(f"  ✓ SearXNG (shared) on port {self.searxng.port}", file=sys.stderr)
         else:
-            print("  ⚠ SearXNG unavailable — web search disabled", file=sys.stderr)
+            self.spinner.start("Starting SearXNG...")
+            ok = self.searxng.start(self.spinner)
+            self.spinner.stop()
+            if ok:
+                print(f"  ✓ SearXNG on port {self.searxng.port}", file=sys.stderr)
+            else:
+                print("  ⚠ SearXNG unavailable — web search disabled", file=sys.stderr)
 
         # Start MCP servers
         if self.mcp_manager.CONFIG_PATH.exists():
@@ -6061,8 +6064,15 @@ def read_prompt_interactive():
 
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
                     debug, verbose, headed=False, resume_id=None, worker_mode=False,
-                    control_file=None):
+                    control_file=None, searxng_url=None):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
+
+    # Pre-set SearXNG URL if provided (worker mode uses shared orchestrator instance)
+    if searxng_url:
+        agent.searxng.port = int(searxng_url.rsplit(":", 1)[-1])
+        agent._skip_searxng_start = True
+    else:
+        agent._skip_searxng_start = False
 
     # Worker mode: emit JSONL events to stdout for orchestrator consumption
     if worker_mode:
@@ -6216,6 +6226,12 @@ class OrchestratorApp:
                 table = self.query_one(DataTable)
                 table.add_columns("ID", "Status", "Phase", "Elapsed", "Cost", "Prompt")
                 table.cursor_type = "row"
+                # Start shared SearXNG instance for all child agents
+                searxng = SearXNG()
+                if searxng.start():
+                    orchestrator._searxng_url = searxng.url
+                    orchestrator._searxng = searxng
+                    self.notify(f"SearXNG started on port {searxng.port}")
 
             async def action_new_agent(self):
                 inp = self.query_one(Input)
@@ -6362,6 +6378,8 @@ class OrchestratorApp:
                 ]
                 if max_loops:
                     cmd.extend(["--max-loops", str(max_loops)])
+                if orchestrator._searxng_url:
+                    cmd.extend(["--_searxng-url", orchestrator._searxng_url])
 
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -6534,6 +6552,9 @@ class OrchestratorApp:
         tui = OrchestratorTUI()
         tui.title = "dothething orchestrator"
         tui.run()
+        # Clean up shared SearXNG instance
+        if hasattr(self, '_searxng') and self._searxng:
+            self._searxng.stop()
 
     def _send_control(self, sid, action, text=None):
         session = self.sessions.get(sid)
@@ -6636,6 +6657,7 @@ def main():
             resume_id=args.resume,
             worker_mode=is_worker,
             control_file=getattr(args, '_control_file', None),
+            searxng_url=getattr(args, '_searxng_url', None),
         ))
     except KeyboardInterrupt:
         pass
