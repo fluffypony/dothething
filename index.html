@@ -69,7 +69,13 @@
         "Context window management via result_mode summarization",
         "Prompt caching (OpenRouter sticky routing, Anthropic block-level)",
         "Custom skills following Claude Code SKILL.md convention",
-        "MCP server integration via ~/.dtt/mcp.json"
+        "MCP server integration via ~/.dtt/mcp.json",
+        "Email automation via AgentMail",
+        "Orchestrator mode for parallel agent management",
+        "Live input injection during agent execution",
+        "System clipboard access (text and images)",
+        "Runtime self-management (config, skills, MCP servers)",
+        "Auto-update from dotheth.ing/VERSION"
       ]
     },
     {
@@ -647,6 +653,7 @@
                     <li vid="87"><strong vid="88">Data Extraction</strong> Processes documents and outputs structured formats.</li>
                     <li vid="89"><strong vid="90">System Administration</strong> Automates local configuration and maintenance tasks.</li>
                     <li vid="91"><strong vid="92">Web Investigation</strong> Conducts competitive analysis via real browser instances.</li>
+                    <li><strong>Email Automation</strong> Sends and receives email through AgentMail.</li>
                 </ul>
             </div>
 
@@ -661,6 +668,12 @@
                             Every tool call includes a <code>result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Sonnet 4.6) for focused summary, preserving context window.</li>
                             <li><strong>Browser Automation</strong>
                             Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to a Sonnet-powered browser agent.</li>
+                            <li><strong>Orchestrator Mode</strong>
+                            <code>--orchestrator</code> opens a Textual terminal UI for running multiple agents in parallel. One line per session showing status, phase, elapsed time, and cost. Expand any session to watch its log, send input, terminate, or copy output. A smart launcher takes your prompt, has Opus split the work, and spins up to 16 concurrent agents. Shows a cost estimate before launch.</li>
+                            <li><strong>Live Input</strong>
+                            Press any key while the agent runs to open an input bar. Enter injects your message immediately, Ctrl-Q queues it for after the current step, Esc cancels. The agent can also ask you questions: OTP codes, preferences, confirmation before destructive actions.</li>
+                            <li><strong>Email</strong>
+                            Send and receive email through AgentMail. First time: the agent signs up, you confirm a one-time OTP from your personal email, and the API key is saved. After that, email works on its own across sessions.</li>
                         </ul>
                     </div>
                     <div class="col-6">
@@ -671,6 +684,12 @@
                             OpenRouter sticky routing plus Anthropic block-level cache controls. Long tasks hit the cache on subsequent turns and input costs drop sharply.</li>
                             <li><strong>Skills &amp; MCP</strong>
                             Drop any Claude Code <code>SKILL.md</code> into <code>~/.dtt/skills/&lt;name&gt;/</code>. Skills with <code>allowed-tools</code> inject into the system prompt; others run as isolated Sonnet sub-tasks. MCP servers plug in via <code>~/.dtt/mcp.json</code> (same format as Claude Code).</li>
+                            <li><strong>Clipboard</strong>
+                            Copies text or images to and pastes from the system clipboard. macOS, Linux (X11 and Wayland), and Windows.</li>
+                            <li><strong>Self-Management</strong>
+                            The agent manages its own configuration at runtime. Tell it to add an API key, install a skill, or connect an MCP server and it handles the file edits and reloads itself. Three tools: <code>manage_config</code>, <code>manage_skill</code>, <code>manage_mcp</code>.</li>
+                            <li><strong>Auto-Update</strong>
+                            The script checks <code>dotheth.ing/VERSION</code> every 6 hours and self-updates if there's a newer version. <code>--update</code> forces an immediate check.</li>
                         </ul>
                     </div>
                 </div>
@@ -691,7 +710,7 @@
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">shell</span>
-                        <div class="tool-desc">run_command, run_code (Python/Bash/TS)</div>
+                        <div class="tool-desc">run_command, run_code (Python/Bash/TS), wait, request_user_input</div>
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">web</span>
@@ -703,7 +722,7 @@
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">oracle</span>
-                        <div class="tool-desc">GPT-5.4 second opinion for the hard calls.</div>
+                        <div class="tool-desc">oracle, think. GPT-5.4 second opinion + free reasoning scratchpad.</div>
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">notes</span>
@@ -711,7 +730,7 @@
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">planning</span>
-                        <div class="tool-desc">plan_create, plan_remaining, plan_update</div>
+                        <div class="tool-desc">plan_create, plan_remaining, plan_update, plan_completed</div>
                     </div>
                     <div class="tool-item">
                         <span class="tool-name">delegate</span>
@@ -729,6 +748,18 @@
                         <span class="tool-name">batch</span>
                         <div class="tool-desc">batch_process, analyze_data. Parallel Sonnet workers for bulk jobs.</div>
                     </div>
+                    <div class="tool-item">
+                        <span class="tool-name">clipboard</span>
+                        <div class="tool-desc">clipboard_copy, clipboard_paste. macOS, Linux, Windows.</div>
+                    </div>
+                    <div class="tool-item">
+                        <span class="tool-name">config</span>
+                        <div class="tool-desc">manage_config, manage_skill, manage_mcp. Runtime self-configuration.</div>
+                    </div>
+                    <div class="tool-item">
+                        <span class="tool-name">email</span>
+                        <div class="tool-desc">email_auth, email_list_inboxes, email_create_inbox, email_list, email_read, email_send, email_delete</div>
+                    </div>
                 </div>
             </div>
 
@@ -745,6 +776,10 @@
                         <tr vid="165"><td class="col-key" vid="166">--verbose</td><td class="col-val" vid="167">Stream raw thought process.</td></tr>
                         <tr><td class="col-key">--headed</td><td class="col-val">Show the browser window for visual debug.</td></tr>
                         <tr><td class="col-key">--debug</td><td class="col-val">Log raw API payloads and cache metrics.</td></tr>
+                        <tr><td class="col-key">--orchestrator</td><td class="col-val">Launch orchestrator mode (multiple parallel agents).</td></tr>
+                        <tr><td class="col-key">--version / -V</td><td class="col-val">Print version and exit.</td></tr>
+                        <tr><td class="col-key">--update</td><td class="col-val">Force an update check (bypasses 6-hour rate limit).</td></tr>
+                        <tr><td class="col-key">--keep-temp</td><td class="col-val">Keep /tmp/dothething on exit.</td></tr>
                     </tbody>
                 </table>
             </div>
