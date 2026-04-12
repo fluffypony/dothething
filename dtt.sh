@@ -7363,7 +7363,11 @@ class OrchestratorApp:
                             output += "\nSTDERR:\n" + stderr.decode(errors="replace")
                         if len(output) > 100000:
                             output = output[:100000] + "\n... (truncated)"
-                        return output if output else "(no output)"
+                        rc = proc.returncode
+                        result = output if output else "(no output)"
+                        if rc != 0:
+                            result = f"[exit code {rc}]\n{result}"
+                        return result
                     except asyncio.TimeoutError:
                         proc.kill()
                         await proc.wait()
