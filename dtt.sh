@@ -7067,7 +7067,22 @@ class OrchestratorApp:
                 )
 
                 asyncio.create_task(self._monitor_session(sid))
+                # Drain stderr to prevent pipe buffer deadlock
+                asyncio.create_task(self._drain_stderr(sid))
                 return sid
+
+            async def _drain_stderr(self, sid):
+                session = orchestrator.sessions.get(sid)
+                if not session:
+                    return
+                proc = session["proc"]
+                try:
+                    while True:
+                        line = await proc.stderr.readline()
+                        if not line:
+                            break
+                except Exception:
+                    pass
 
             async def _monitor_session(self, sid):
                 session = orchestrator.sessions[sid]
@@ -7132,6 +7147,9 @@ class OrchestratorApp:
 
             async def _do_smart_launch(self, meta_prompt):
                 self.notify("Smart launcher processing...", severity="information")
+                self.run_worker(self._smart_launch_worker(meta_prompt), exclusive=True)
+
+            async def _smart_launch_worker(self, meta_prompt):
                 tools = [{
                     "type": "function",
                     "function": {
@@ -7183,7 +7201,8 @@ class OrchestratorApp:
                                     pass
 
                     if not launches:
-                        self.notify("Smart launcher did not produce any agents.", severity="warning")
+                        self.app.call_from_thread(
+                            self.notify, "Smart launcher did not produce any agents.", severity="warning")
                         return
 
                     total_est_turns = sum(l.get("estimated_turns", 8) for l in launches)
