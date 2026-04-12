@@ -4680,6 +4680,9 @@ class Agent:
             del env[key]
             os.environ.pop(key, None)
 
+        if action not in ("set", "delete"):
+            return f"Error: unknown action '{action}'"
+
         new_content = "\n".join(comment_lines) + "\n" if comment_lines else ""
         new_content += "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items()) + "\n"
 
@@ -5411,8 +5414,11 @@ class Agent:
             self.spinner.start(f"Thinking (turn {loop + 1})…")
             result = await self._call_model()
             self.spinner.stop()
+            usage = result.get("usage", {}) if result else {}
+            self.events.emit("model_end", tokens=usage)
 
             if not result:
+                self.events.emit("error", message="Empty model response")
                 print("  ⚠ Empty response — retrying…", file=sys.stderr)
                 await asyncio.sleep(2)
                 continue
@@ -5434,6 +5440,7 @@ class Agent:
                     _reasoning[_rkey] = msg[_rkey]
 
             if text and text.strip():
+                self.events.emit("assistant_text", text=text)
                 print(f"\n┌─ Agent {'─' * 50}", file=sys.stderr)
                 for line in text.split("\n"):
                     print(f"│ {line}", file=sys.stderr)
@@ -5529,6 +5536,7 @@ class Agent:
                         head.startswith("http request error"))
             error_results = [r for r in results if _is_error_result(r["content"])]
             if error_results and len(error_results) == len(results):
+                self.events.emit("error", message=f"All {len(results)} tool calls failed")
                 self.messages.append({
                     "role": "user",
                     "content": "[System] All tool calls in this turn failed. "
@@ -5699,23 +5707,23 @@ class Agent:
                 skills_section += f"- {name}: {desc}\n"
             skills_section += "</available_skills>\n"
 
-        # Build MCP section
+        # Build MCP section — reuse get_prompt_section() which handles the
+        # tools_raw dict correctly, then wrap it in <mcp_tools> tags for
+        # consistent stripping on the next rebuild.
         mcp_section = ""
         if self.mcp_manager.servers:
-            mcp_section = "\n<mcp_tools>\nAdditional tools from MCP servers:\n"
-            for srv_name, srv in self.mcp_manager.servers.items():
-                for t in srv.get("tools_raw", []):
-                    tool_name = f"mcp__{srv_name}__{t.name}" if hasattr(t, 'name') else str(t)
-                    desc = getattr(t, 'description', '') if hasattr(t, 'description') else ''
-                    mcp_section += f"- {tool_name}: {desc}\n"
-            mcp_section += "</mcp_tools>\n"
+            raw_mcp = self.mcp_manager.get_prompt_section()
+            if raw_mcp:
+                # get_prompt_section uses <mcp_servers> tags; rewrap as <mcp_tools>
+                inner = raw_mcp.replace("<mcp_servers>", "").replace("</mcp_servers>", "").strip()
+                mcp_section = f"\n<mcp_tools>\n{inner}\n</mcp_tools>\n"
 
         # Reassemble the static block text
         static_block = content[0]
         if isinstance(static_block, dict) and "text" in static_block:
             base_text = static_block["text"]
             # Strip old skills/MCP sections if present
-            for tag in ["<inline_skills>", "<available_skills>", "<mcp_tools>"]:
+            for tag in ["<inline_skills>", "<available_skills>", "<mcp_tools>", "<mcp_servers>"]:
                 end_tag = tag.replace("<", "</")
                 while tag in base_text:
                     start = base_text.find(tag)
@@ -5816,6 +5824,7 @@ class Agent:
                             await self.cost_tracker.track(rid2, "opus")
                         if "error" not in result:
                             return result
+                    self.events.emit("error", message=f"API error: {msg}")
                     print(f"\n  ⚠ API error: {msg}", file=sys.stderr)
                     if attempt < retries - 1:
                         await asyncio.sleep(2)
@@ -6078,6 +6087,7 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         agent.events.on("tool_start", _jsonl_handler)
         agent.events.on("tool_end", _jsonl_handler)
         agent.events.on("status", _jsonl_handler)
+        agent.events.on("assistant_text", _jsonl_handler)
         agent.events.on("finalized", _jsonl_handler)
         agent.events.on("cost", _jsonl_handler)
         agent.events.on("error", _jsonl_handler)
