@@ -2847,6 +2847,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_wait_for_message",
+            "description": (
+                "Poll an inbox until a message matching the filter arrives or timeout expires. "
+                "Use for workflows that depend on receiving a reply (e.g., OTP, confirmation). "
+                "Polls every poll_interval seconds. Returns the matching message or timeout notice."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": {"type": "string", "description": "Inbox ID (uses default if omitted)"},
+                    "from_contains": {"type": "string", "description": "Match messages from addresses containing this string"},
+                    "subject_contains": {"type": "string", "description": "Match messages whose subject contains this (case-insensitive)"},
+                    "body_contains": {"type": "string", "description": "Match messages whose body contains this string"},
+                    "thread_id": {"type": "string", "description": "Match messages in this specific thread"},
+                    "since_message_id": {"type": "string", "description": "Only consider messages newer than this ID"},
+                    "timeout_seconds": {"type": "integer", "description": "Max seconds to wait (default: 120, max: 600)"},
+                    "poll_interval": {"type": "integer", "description": "Seconds between polls (default: 10, min: 5)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
 ]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3138,6 +3164,9 @@ credentials. Skip entirely if AGENTMAIL_API_KEY is set.
 - email_delete: Thread-scoped. Provide thread_id or message_id.
 - email_list_inboxes: List all inboxes.
 - email_create_inbox: Create a new inbox.
+- email_wait_for_message: Poll inbox until a matching message arrives. Use for OTP flows, \
+confirmation emails, reply-dependent workflows. Set from_contains, subject_contains, or \
+thread_id to filter. Prefer this over manual wait + email_list polling loops.
 </tool_tips>
 
 <error_recovery>
@@ -3434,6 +3463,7 @@ class Agent:
         "email_read":          "_tool_email_read",
         "email_send":          "_tool_email_send",
         "email_delete":        "_tool_email_delete",
+        "email_wait_for_message": "_tool_email_wait_for_message",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False, headed=False):
@@ -5311,6 +5341,103 @@ class Agent:
             return f"Thread {thread_id} {action_desc}."
         except Exception as e:
             return f"Email delete error: {e}"
+
+    async def _tool_email_wait_for_message(self, inbox_id=None, from_contains=None,
+                                            subject_contains=None, body_contains=None,
+                                            thread_id=None, since_message_id=None,
+                                            timeout_seconds=120, poll_interval=10, **kw):
+        timeout_seconds = max(10, min(int(timeout_seconds or 120), 600))
+        poll_interval = max(5, min(int(poll_interval or 10), 60))
+        try:
+            client = self.email_manager._ensure_client()
+        except Exception as e:
+            return f"Error: {e}"
+        inbox = self.email_manager._resolve_inbox(inbox_id)
+        if not inbox:
+            return "Error: no inbox_id configured."
+
+        deadline = time.time() + timeout_seconds
+        seen_ids = set()
+        attempts = 0
+
+        while time.time() < deadline:
+            attempts += 1
+            self.spinner.update(f"Polling inbox (attempt {attempts}, {int(deadline - time.time())}s left)...")
+            try:
+                try:
+                    response = client.inboxes.threads.list(inbox, limit=20)
+                    items = getattr(response, 'threads', []) or []
+                except (AttributeError, TypeError):
+                    response = client.inboxes.messages.list(inbox, limit=20)
+                    items = getattr(response, 'messages', []) or []
+
+                for item in items:
+                    mid = getattr(item, 'message_id', getattr(item, 'thread_id', str(item)))
+                    if mid in seen_ids:
+                        continue
+                    if since_message_id and mid == since_message_id:
+                        break
+
+                    subj = str(getattr(item, 'subject', '')).lower()
+                    sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
+                    tid = getattr(item, 'thread_id', '')
+                    body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
+
+                    if from_contains and from_contains.lower() not in sender:
+                        continue
+                    if subject_contains and subject_contains.lower() not in subj:
+                        continue
+                    if body_contains and body_contains.lower() not in body_text:
+                        continue
+                    if thread_id and tid != thread_id:
+                        continue
+
+                    # Match found — try to read full message
+                    full_msg_id = getattr(item, 'message_id', None)
+                    full_thread_id = getattr(item, 'thread_id', None)
+                    if full_msg_id or full_thread_id:
+                        try:
+                            return await self._tool_email_read(
+                                message_id=full_msg_id,
+                                thread_id=full_thread_id,
+                                inbox_id=inbox_id
+                            )
+                        except Exception:
+                            pass
+
+                    return json.dumps({
+                        "found": True,
+                        "message_id": str(mid),
+                        "thread_id": tid,
+                        "subject": getattr(item, 'subject', ''),
+                        "from": getattr(item, 'from_', getattr(item, 'sender', '')),
+                        "date": str(getattr(item, 'timestamp', getattr(item, 'created_at', ''))),
+                        "snippet": (getattr(item, 'preview', getattr(item, 'text', '')) or '')[:500],
+                        "attempts": attempts,
+                    }, indent=2, ensure_ascii=False, default=str)
+
+                for item in items:
+                    seen_ids.add(getattr(item, 'message_id', getattr(item, 'thread_id', str(item))))
+
+            except Exception:
+                pass
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_interval, max(1, remaining)))
+
+        return json.dumps({
+            "found": False,
+            "attempts": attempts,
+            "message": f"No matching message after {timeout_seconds}s",
+            "filters": {
+                "from_contains": from_contains,
+                "subject_contains": subject_contains,
+                "body_contains": body_contains,
+                "thread_id": thread_id,
+            },
+        }, indent=2)
 
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
