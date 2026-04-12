@@ -12,7 +12,7 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 
 - Plans its work and tracks progress
 - Searches the web using a local SearXNG instance (supports Google, Bing, DuckDuckGo, and more -- you can target specific engines or search images directly)
-- Browses pages with Notte and Camoufox (a stealth Firefox fork). Extracts clean content, solves captchas automatically, and handles complex multi-step web interactions
+- Browses pages with Notte and Camoufox (a Firefox fork built to avoid fingerprinting). Extracts page content, solves captchas, and handles multi-step web interactions
 - Reads and edits files, runs shell commands, makes HTTP requests
 - Connects to your existing MCP servers via `~/.dtt/mcp.json`
 - Loads custom skills from `~/.dtt/skills/<skill-name>/SKILL.md` (Claude Code convention) -- behavioral skills inject directly into the agent's context, while text-processing skills run as isolated sub-tasks
@@ -66,6 +66,11 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 | `--resume ID` | Pick up a previous session by thread ID |
 | `--headed` | Show the browser window for visual debugging |
 | `--orchestrator` | Launch orchestrator mode -- run and manage multiple agents from one terminal |
+| `--pipe` | Stdout-only output for Unix pipelines. Final report on stdout, everything else suppressed. Exit codes: 0=complete, 2=partial, 1=failed |
+| `--tui` | Full-screen terminal UI for single-agent mode (experimental) |
+| `--notify-desktop` | Send a desktop notification when the task finishes |
+| `--notify-email EMAIL` | Email a notification to this address when the task finishes (requires AgentMail) |
+| `--max-cost USD` | Stop and checkpoint when cumulative cost reaches this amount |
 | `--verbose` | Show full error tracebacks |
 | `--debug` | Log raw API payloads and cache metrics |
 
@@ -73,7 +78,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 
 The agent routes Claude Opus through OpenRouter. Every turn, the model decides which tools to call, processes the results, and decides what to do next.
 
-**result_mode.** Every tool call has a `result_mode`. If you need exact output, use `"raw"`. If you tell it to "extract all function signatures", it pipes the output through Sonnet for a tight summary before the main agent sees it. This keeps the context window from blowing up on long tasks.
+**result_mode.** Every tool call has a `result_mode`. If you need exact output, use `"raw"`. If you tell it to "extract all function signatures", it pipes the output through Sonnet for a tight summary before the main agent sees it. This keeps the context window manageable on long tasks.
 
 **Browser automation.** We use Notte with Camoufox under the hood. For simple scraping, `fetch_page` grabs clean markdown with no LLM cost. If a captcha shows up, it gets solved automatically. For complex multi-step interactions (login flows, forms, SPAs), the agent can hand off the session to a dedicated Notte browser agent via `browser_agent`.
 
@@ -123,7 +128,7 @@ All calls route through OpenRouter. You only need one API key.
 
 **File operations:** `read_file`, `write_file`, `edit_file`, `batch_read`, `diff_files`
 
-**System:** `run_command`, `run_code`, `glob`, `list_dir`, `search_file`, `clipboard_copy`, `clipboard_paste`, `request_user_input`
+**System:** `run_command`, `shell_session`, `run_code`, `glob`, `list_dir`, `search_file`, `clipboard_copy`, `clipboard_paste`, `request_user_input`
 
 **Web:** `search_web` (with engine/category targeting), `fetch_page` (Notte-powered scraping), `browser_agent` (full interactive control), `http_request`
 
@@ -133,7 +138,7 @@ All calls route through OpenRouter. You only need one API key.
 
 **Config:** `manage_config`, `manage_skill`, `manage_mcp`
 
-**Email:** `email_auth`, `email_list_inboxes`, `email_create_inbox`, `email_list`, `email_read`, `email_send`, `email_delete`
+**Email:** `email_auth`, `email_list_inboxes`, `email_create_inbox`, `email_list`, `email_read`, `email_send`, `email_delete`, `email_wait_for_message`
 
 **Extensions:** `use_skill` (custom skills), MCP tools (from configured servers)
 
@@ -195,6 +200,42 @@ All variables can be saved to `~/.dtt/env` (shell-exported values take precedenc
 | `~/.dtt/skills/<name>/SKILL.md` | User-defined skills (Claude Code convention) |
 | `~/.dtt/mcp.json` | MCP server configuration |
 | `/tmp/dothething/` | Runtime: Python venv, SearXNG, Camoufox browser |
+
+## Pipe mode
+
+`--pipe` sends only the final report to stdout and mutes everything else. Use it when you need to chain dothething into other commands:
+
+```bash
+./dtt.sh --pipe --prompt "Summarize the README in this repo" | pbcopy
+./dtt.sh --pipe --prompt "List all TODO comments" > todos.txt
+cat spec.md | ./dtt.sh --pipe --prompt "Review this spec"
+```
+
+Exit codes: 0 means complete, 2 means partial, 1 means failed.
+
+## Notifications
+
+`--notify-desktop` pops a system notification when the task finishes. On macOS this uses osascript, on Linux it uses notify-send.
+
+`--notify-email you@example.com` sends a short email summary when done. Requires AgentMail to be configured.
+
+Both work in orchestrator mode -- you get per-agent notifications as they finish, plus one when all agents are done.
+
+## Persistent shell
+
+The `shell_session` tool provides a stateful bash session that persists environment variables, working directory, and shell state across calls. Use it for multi-step build processes, interactive debugging, or anything where shell state matters between commands. For simple one-off commands, `run_command` is still there and simpler.
+
+## Cost limits
+
+`--max-cost 5.00` stops the agent when cumulative spending hits $5. The agent checkpoints its state so you can `--resume` later if you want to continue. Useful for fire-and-forget runs where you don't want to babysit the budget.
+
+## Email polling
+
+`email_wait_for_message` pauses the agent until a specific reply hits the inbox. Set filters on sender, subject, or thread. The agent polls every few seconds and returns the message when it arrives, or times out. Saves you from wasting tokens on manual poll loops.
+
+## Security
+
+Persisted thread logs (`~/.dtt/threads/`) are redacted -- API keys, tokens, and secrets are masked before writing to disk. The same redaction applies to `--debug` output.
 
 ## License
 
