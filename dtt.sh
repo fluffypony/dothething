@@ -77,7 +77,10 @@ for arg in "$@"; do
     --keep-temp)
       KEEP_TEMP=true
       ;;
-    --headed|--orchestrator)
+    --headed|--orchestrator|--pipe|--notify-desktop|--tui)
+      PASS_ARGS+=("$arg")
+      ;;
+    --notify-email|--max-cost)
       PASS_ARGS+=("$arg")
       ;;
     -V|--version)
@@ -95,7 +98,8 @@ Usage:
   ./dtt.sh [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
            [--oraclepro] [--headed] [--orchestrator] [--verbose]
            [--debug] [--keep-temp] [--resume THREAD_ID] [--version]
-           [--update]
+           [--update] [--pipe] [--tui] [--notify-desktop]
+           [--notify-email EMAIL] [--max-cost USD]
 
 Flags:
   --fast          Use anthropic/claude-opus-4.6-fast instead of opus
@@ -108,6 +112,11 @@ Flags:
                   editor open, to supply fresh instructions on resume.
   --headed        Show the browser window for visual debugging
   --orchestrator  Launch orchestrator mode (manage multiple parallel agents)
+  --pipe          Pipe mode: only final report on stdout, all other output suppressed
+  --tui           Full-screen terminal UI for single-agent mode (experimental)
+  --notify-desktop  Send a desktop notification when the task finishes
+  --notify-email EMAIL  Email a notification to EMAIL when the task finishes
+  --max-cost USD  Stop and checkpoint when cumulative cost reaches this amount
   --verbose       Verbose error traces
   --debug         Debug-level logging of API payloads
   --keep-temp     Keep the temp runtime directory on exit
@@ -3543,6 +3552,10 @@ class Agent:
         self._shell_master = None
         self._shell_proc = None
         self._shell_lock = asyncio.Lock()
+        # Pipe mode and cost governor
+        self._pipe_mode = False
+        self._max_cost = None
+        self._cost_guard = None
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -5828,6 +5841,19 @@ class Agent:
                 except Exception:
                     pass
 
+            # Budget governor check
+            if self._max_cost and self.cost_tracker.total_cost >= self._max_cost:
+                print(f"\n  ⚠ Cost budget ${self._max_cost:.2f} reached "
+                      f"(${self.cost_tracker.total_cost:.2f} spent). Checkpointing.",
+                      file=sys.stderr)
+                if self.thread_logger:
+                    self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
+                print(f"  Resume with: dtt.sh --resume {getattr(self, '_thread_id', 'unknown')}", file=sys.stderr)
+                self._final_status = "partial"
+                self._final_report = f"Budget limit ${self._max_cost:.2f} reached. Checkpointed for resume."
+                self.events.emit("exit", code=0)
+                break
+
             await self._maybe_compact_context()
             self.events.emit("turn_start", turn=loop)
             self.spinner.start(f"Thinking (turn {loop + 1})…")
@@ -6392,6 +6418,10 @@ class Agent:
 
     # ── Display ──────────────────────────────────────────────────
     def _show_final(self, report):
+        if self._pipe_mode:
+            if self._final_report:
+                print(self._final_report)
+            return
         status_label = {
             "complete": "✅ TASK COMPLETE",
             "partial": "⚠️  TASK PARTIAL",
@@ -6413,6 +6443,8 @@ class Agent:
             print(report, file=sys.stderr)
 
     def _show_cost_report(self):
+        if self._pipe_mode:
+            return
         rpt = self.cost_tracker.report()
         total = self.cost_tracker.total_cost
         self.events.emit("cost", total=total)
@@ -6507,10 +6539,85 @@ def read_prompt_interactive():
         return "\n".join(lines)
 
 
+def _send_desktop_notification(title, body, urgency="normal"):
+    """Send a cross-platform desktop notification. Best-effort, never raises."""
+    try:
+        if sys.platform == "darwin":
+            safe_body = body.replace('"', '\\"').replace("'", "\\'")[:200]
+            safe_title = title.replace('"', '\\"').replace("'", "\\'")
+            script = f'display notification "{safe_body}" with title "{safe_title}"'
+            subprocess.run(["osascript", "-e", script],
+                         capture_output=True, timeout=5)
+        elif sys.platform.startswith("linux"):
+            subprocess.run(["notify-send", f"--urgency={urgency}", title, body[:500]],
+                         capture_output=True, timeout=5)
+        elif sys.platform == "win32":
+            ps = (
+                f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, '
+                f'ContentType = WindowsRuntime] > $null; '
+                f'$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(0); '
+                f'$xml.GetElementsByTagName("text")[0].AppendChild($xml.CreateTextNode("{title}: {body[:200]}")) > $null; '
+                f'[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("dothething").Show('
+                f'[Windows.UI.Notifications.ToastNotification]::new($xml))'
+            )
+            subprocess.run(["powershell", "-command", ps],
+                         capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+async def _send_email_notification(to_email, subject, body):
+    """Send a notification email via AgentMail. Best-effort."""
+    try:
+        api_key = os.environ.get("AGENTMAIL_API_KEY")
+        inbox_id = os.environ.get("AGENTMAIL_INBOX_ID")
+        if not api_key or not inbox_id:
+            print("  ⚠ --notify-email requires AGENTMAIL_API_KEY and AGENTMAIL_INBOX_ID",
+                  file=sys.stderr)
+            return
+        from agentmail import AgentMail
+        client = AgentMail(api_key=api_key)
+        client.inboxes.messages.send(
+            inbox_id,
+            to=[to_email],
+            subject=subject,
+            text=body[:5000],
+        )
+    except Exception as e:
+        print(f"  ⚠ Email notification failed: {e}", file=sys.stderr)
+
+
+class CostGuard:
+    """Hard spending limit with checkpoint-and-exit."""
+    def __init__(self, max_cost, events):
+        self.max_cost = max_cost
+        self._warned = False
+        events.on("cost", self._on_cost)
+
+    def _on_cost(self, **kw):
+        total = kw.get("total", 0.0)
+        if self.max_cost and total >= self.max_cost * 0.8 and not self._warned:
+            self._warned = True
+
+
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
                     debug, verbose, headed=False, resume_id=None, worker_mode=False,
-                    control_file=None, searxng_url=None):
+                    control_file=None, searxng_url=None, pipe_mode=False,
+                    notify_desktop=False, notify_email=None, max_cost=None,
+                    tui_mode=False):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
+
+    # Pipe mode: suppress all non-report output
+    if pipe_mode:
+        agent._pipe_mode = True
+        agent.spinner = Spinner(enabled=False)
+        agent.input_handler = InputHandler(agent)
+        agent.input_handler.enabled = False
+
+    # Max-cost budget governor
+    if max_cost:
+        agent._max_cost = max_cost
+        agent._cost_guard = CostGuard(max_cost, agent.events)
 
     # Pre-set SearXNG URL if provided (worker mode uses shared orchestrator instance)
     if searxng_url:
@@ -6591,9 +6698,33 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         # Final save
         if agent.thread_logger:
             agent.thread_logger.save_messages(agent.messages, agent._secret_tool_call_ids)
+
+        # Send notifications before cleanup
+        if notify_desktop:
+            status = agent._final_status or "unknown"
+            cost_str = f"${agent.cost_tracker.total_cost:.2f}"
+            _send_desktop_notification(
+                f"dothething — {status}",
+                f"Task {status} ({cost_str}). " + ((agent._final_report or "")[:150])
+            )
+        if notify_email:
+            status = agent._final_status or "unknown"
+            cost_str = f"${agent.cost_tracker.total_cost:.2f}"
+            subject = f"dothething: Task {status} ({cost_str})"
+            body = (
+                f"Status: {status}\n"
+                f"Thread: {thread_id}\n"
+                f"Cost: {cost_str}\n\n"
+                f"Report:\n{(agent._final_report or '(no report)')[:4000]}"
+            )
+            if agent._final_files:
+                body += "\n\nFiles:\n" + "\n".join(f"  - {f}" for f in agent._final_files)
+            await _send_email_notification(notify_email, subject, body)
+
         await agent.cleanup()
-        print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
-        print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
+        if not pipe_mode:
+            print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
+            print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -7041,6 +7172,11 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Verbose error traces")
     parser.add_argument("--debug", action="store_true", help="Debug-level API payload logging")
     parser.add_argument("--orchestrator", action="store_true", help="Launch orchestrator mode (manage multiple parallel agents)")
+    parser.add_argument("--pipe", action="store_true", help="Pipe mode: final report to stdout, everything else suppressed")
+    parser.add_argument("--tui", action="store_true", help="Full-screen terminal UI for single-agent mode (experimental)")
+    parser.add_argument("--notify-desktop", action="store_true", help="Send a desktop notification when the task completes")
+    parser.add_argument("--notify-email", type=str, default=None, metavar="EMAIL", help="Send an email notification to this address when the task completes (requires AgentMail)")
+    parser.add_argument("--max-cost", type=float, default=None, metavar="USD", help="Stop and checkpoint when cumulative cost exceeds this amount")
     # Hidden worker-mode flags (used by orchestrator to spawn child agents)
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_events-jsonl", action="store_true", help=argparse.SUPPRESS)
@@ -7094,9 +7230,21 @@ def main():
         print("Error: Empty prompt.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\n{'─' * 58}", file=sys.stderr)
-    print("  dothething | https://dotheth.ing", file=sys.stderr)
-    print(f"{'─' * 58}\n", file=sys.stderr)
+    pipe_mode = getattr(args, 'pipe', False)
+
+    # Pipe mode validation
+    if pipe_mode:
+        if not args.prompt and not args.positional_prompt and sys.stdin.isatty():
+            print("Error: --pipe requires --prompt, positional prompt, or piped stdin.", file=sys.stderr)
+            sys.exit(1)
+        if getattr(args, 'orchestrator', False):
+            print("Error: --pipe and --orchestrator are mutually exclusive.", file=sys.stderr)
+            sys.exit(1)
+
+    if not pipe_mode:
+        print(f"\n{'─' * 58}", file=sys.stderr)
+        print("  dothething | https://dotheth.ing", file=sys.stderr)
+        print(f"{'─' * 58}\n", file=sys.stderr)
 
     try:
         asyncio.run(run_agent(
@@ -7113,6 +7261,11 @@ def main():
             worker_mode=is_worker,
             control_file=getattr(args, '_control_file', None),
             searxng_url=getattr(args, '_searxng_url', None),
+            pipe_mode=pipe_mode,
+            notify_desktop=getattr(args, 'notify_desktop', False),
+            notify_email=getattr(args, 'notify_email', None),
+            max_cost=getattr(args, 'max_cost', None),
+            tui_mode=getattr(args, 'tui', False),
         ))
     except KeyboardInterrupt:
         pass
