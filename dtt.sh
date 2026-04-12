@@ -6051,11 +6051,11 @@ def read_prompt_interactive():
 
 
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
-                    debug, verbose, headed=False, resume_id=None, worker_mode=False):
+                    debug, verbose, headed=False, resume_id=None, worker_mode=False,
+                    control_file=None):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
 
     # Worker mode: emit JSONL events to stdout for orchestrator consumption
-    control_file = getattr(args, '_control_file', None) if hasattr(args, '_control_file') else None
     if worker_mode:
         agent.spinner = Spinner(enabled=False)
         agent.input_handler = InputHandler(agent)
@@ -6625,6 +6625,7 @@ def main():
             headed=args.headed,
             resume_id=args.resume,
             worker_mode=is_worker,
+            control_file=getattr(args, '_control_file', None),
         ))
     except KeyboardInterrupt:
         pass
