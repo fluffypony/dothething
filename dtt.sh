@@ -115,11 +115,14 @@ Flags:
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
   TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
+  AGENTMAIL_API_KEY      Optional. AgentMail key for email tools.
+  AGENTMAIL_INBOX_ID     Optional. Default AgentMail inbox ID.
+  AGENTMAIL_HUMAN_EMAIL  Optional. Human email for AgentMail OTP verification.
 
-On first run (or whenever both are unset and no ~/.dtt/env exists), dtt
-will prompt for these interactively and save them to ~/.dtt/env (mode 0600).
-Delete that file to re-run setup. Env vars in the current shell take
-precedence if OPENROUTER_API_KEY is already set.
+On first run (or whenever OPENROUTER_API_KEY is unset and no ~/.dtt/env
+exists), dtt will prompt for the required key interactively and save it to
+~/.dtt/env (mode 0600). Delete that file to re-run setup. Shell-exported
+env vars always take precedence over values in ~/.dtt/env.
 HELP
       exit 0
       ;;
@@ -146,9 +149,27 @@ done
 
 # ── API key config (loaded from ~/.dtt/env or prompted on first run) ────
 DTT_ENV_FILE="$HOME/.dtt/env"
-if [ -f "$DTT_ENV_FILE" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+if [ -f "$DTT_ENV_FILE" ]; then
+    # Remember current shell values (shell-exported vars always win)
+    _dtt_saved_OR="${OPENROUTER_API_KEY:-}"
+    _dtt_saved_TC="${TWOCAPTCHA_API_KEY:-}"
+    _dtt_saved_AM="${AGENTMAIL_API_KEY:-}"
+    _dtt_saved_AI="${AGENTMAIL_INBOX_ID:-}"
+    _dtt_saved_AH="${AGENTMAIL_HUMAN_EMAIL:-}"
+
+    # Source file (it uses export KEY=value lines)
     # shellcheck disable=SC1090
+    set -a
     . "$DTT_ENV_FILE"
+    set +a
+
+    # Restore shell-exported values (they take precedence)
+    [ -n "$_dtt_saved_OR" ] && export OPENROUTER_API_KEY="$_dtt_saved_OR"
+    [ -n "$_dtt_saved_TC" ] && export TWOCAPTCHA_API_KEY="$_dtt_saved_TC"
+    [ -n "$_dtt_saved_AM" ] && export AGENTMAIL_API_KEY="$_dtt_saved_AM"
+    [ -n "$_dtt_saved_AI" ] && export AGENTMAIL_INBOX_ID="$_dtt_saved_AI"
+    [ -n "$_dtt_saved_AH" ] && export AGENTMAIL_HUMAN_EMAIL="$_dtt_saved_AH"
+    unset _dtt_saved_OR _dtt_saved_TC _dtt_saved_AM _dtt_saved_AI _dtt_saved_AH
 fi
 
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
@@ -4908,6 +4929,6 @@ if __name__ == "__main__":
     main()
 PYTHON_AGENT
 
-python "$BASE/agent.py" "$@" && _dtt_status=0 || _dtt_status=$?
+python "$BASE/agent.py" "${PASS_ARGS[@]}" && _dtt_status=0 || _dtt_status=$?
 dtt_update || true
 exit "$_dtt_status"
