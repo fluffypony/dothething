@@ -5419,78 +5419,57 @@ class Agent:
                     return (mid, tid, ts, cnt, preview)
 
                 if baseline_snapshot is None:
-                    # First poll: capture baseline, don't match anything yet
-                    baseline_snapshot = set(_item_fingerprint(item) for item in items)
-                    # But still check if any current items match filters + since_message_id
-                    # (the message may already be there)
+                    # First poll: build baseline from items we should NOT match
                     if since_message_id:
-                        # If since_message_id is specified, we only want NEW messages
-                        pass
-                    else:
-                        # No since_message_id: check if any existing items match
+                        # Only baseline items from since_message_id onward (older items).
+                        # Items before since_message_id in the list are newer and should be matchable.
+                        baseline_items = []
+                        found_since = False
                         for item in items:
-                            subj = str(getattr(item, 'subject', '')).lower()
-                            sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
-                            tid_val = getattr(item, 'thread_id', '')
-                            body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
-                            if from_contains and from_contains.lower() not in sender:
-                                continue
-                            if subject_contains and subject_contains.lower() not in subj:
-                                continue
-                            if body_contains and body_contains.lower() not in body_text:
-                                continue
-                            if thread_id and tid_val != thread_id:
-                                continue
-                            # Match found in initial scan
-                            full_msg_id = getattr(item, 'message_id', None)
-                            full_thread_id = getattr(item, 'thread_id', None)
-                            if full_msg_id or full_thread_id:
-                                try:
-                                    return await self._tool_email_read(
-                                        message_id=full_msg_id, thread_id=full_thread_id, inbox_id=inbox_id)
-                                except Exception:
-                                    pass
-                            return json.dumps({
-                                "found": True, "message_id": str(getattr(item, 'message_id', '')),
-                                "thread_id": tid_val, "subject": getattr(item, 'subject', ''),
-                                "from": getattr(item, 'from_', getattr(item, 'sender', '')),
-                                "attempts": attempts,
-                            }, indent=2, ensure_ascii=False, default=str)
-                else:
-                    # Subsequent polls: look for items with new fingerprints
-                    for item in items:
-                        fp = _item_fingerprint(item)
-                        if fp in baseline_snapshot:
-                            continue  # Already existed at baseline
+                            mid = getattr(item, 'message_id', '')
+                            if mid == since_message_id:
+                                found_since = True
+                            if found_since:
+                                baseline_items.append(item)
+                        baseline_snapshot = set(_item_fingerprint(item) for item in baseline_items)
+                    else:
+                        # No since_message_id: baseline everything already present
+                        baseline_snapshot = set(_item_fingerprint(item) for item in items)
 
-                        subj = str(getattr(item, 'subject', '')).lower()
-                        sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
-                        tid_val = getattr(item, 'thread_id', '')
-                        body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
+                # Unified matching: check all items against baseline + filters
+                for item in items:
+                    fp = _item_fingerprint(item)
+                    if fp in baseline_snapshot:
+                        continue
 
-                        if from_contains and from_contains.lower() not in sender:
-                            continue
-                        if subject_contains and subject_contains.lower() not in subj:
-                            continue
-                        if body_contains and body_contains.lower() not in body_text:
-                            continue
-                        if thread_id and tid_val != thread_id:
-                            continue
+                    subj = str(getattr(item, 'subject', '')).lower()
+                    sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
+                    tid_val = getattr(item, 'thread_id', '')
+                    body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
 
-                        full_msg_id = getattr(item, 'message_id', None)
-                        full_thread_id = getattr(item, 'thread_id', None)
-                        if full_msg_id or full_thread_id:
-                            try:
-                                return await self._tool_email_read(
-                                    message_id=full_msg_id, thread_id=full_thread_id, inbox_id=inbox_id)
-                            except Exception:
-                                pass
-                        return json.dumps({
-                            "found": True, "message_id": str(getattr(item, 'message_id', '')),
-                            "thread_id": tid_val, "subject": getattr(item, 'subject', ''),
-                            "from": getattr(item, 'from_', getattr(item, 'sender', '')),
-                            "attempts": attempts,
-                        }, indent=2, ensure_ascii=False, default=str)
+                    if from_contains and from_contains.lower() not in sender:
+                        continue
+                    if subject_contains and subject_contains.lower() not in subj:
+                        continue
+                    if body_contains and body_contains.lower() not in body_text:
+                        continue
+                    if thread_id and tid_val != thread_id:
+                        continue
+
+                    full_msg_id = getattr(item, 'message_id', None)
+                    full_thread_id = getattr(item, 'thread_id', None)
+                    if full_msg_id or full_thread_id:
+                        try:
+                            return await self._tool_email_read(
+                                message_id=full_msg_id, thread_id=full_thread_id, inbox_id=inbox_id)
+                        except Exception:
+                            pass
+                    return json.dumps({
+                        "found": True, "message_id": str(getattr(item, 'message_id', '')),
+                        "thread_id": tid_val, "subject": getattr(item, 'subject', ''),
+                        "from": getattr(item, 'from_', getattr(item, 'sender', '')),
+                        "attempts": attempts,
+                    }, indent=2, ensure_ascii=False, default=str)
 
             except Exception:
                 pass
@@ -6809,10 +6788,14 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
             await agent.run(prompt, max_loops=max_loops, resume_messages=resume_messages)
     except KeyboardInterrupt:
         print("\n\n  ⚡ Interrupted!", file=sys.stderr)
+        if not agent._finalized:
+            agent._final_status = "failed"
     except Exception as e:
         print(f"\n  ⚠ Fatal error: {e}", file=sys.stderr)
         if verbose:
             traceback.print_exc(file=sys.stderr)
+        if not agent._finalized:
+            agent._final_status = "failed"
     finally:
         # Final save
         if agent.thread_logger:
