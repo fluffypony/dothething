@@ -77,7 +77,7 @@ for arg in "$@"; do
     --keep-temp)
       KEEP_TEMP=true
       ;;
-    --headed)
+    --headed|--orchestrator)
       PASS_ARGS+=("$arg")
       ;;
     -V|--version)
@@ -93,8 +93,9 @@ dothething — autonomous AI agent | https://dotheth.ing
 
 Usage:
   ./dtt.sh [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
-           [--oraclepro] [--headed] [--verbose] [--debug] [--keep-temp]
-           [--resume THREAD_ID] [--version] [--update]
+           [--oraclepro] [--headed] [--orchestrator] [--verbose]
+           [--debug] [--keep-temp] [--resume THREAD_ID] [--version]
+           [--update]
 
 Flags:
   --fast          Use anthropic/claude-opus-4.6-fast instead of opus
@@ -106,6 +107,7 @@ Flags:
                   Combine with --prompt or positional text, or just let the
                   editor open, to supply fresh instructions on resume.
   --headed        Show the browser window for visual debugging
+  --orchestrator  Launch orchestrator mode (manage multiple parallel agents)
   --verbose       Verbose error traces
   --debug         Debug-level logging of API payloads
   --keep-temp     Keep the temp runtime directory on exit
@@ -243,13 +245,14 @@ if [ ! -d "$VENV" ]; then
 fi
 source "$VENV/bin/activate"
 
-if [ ! -f "$BASE/.deps_v6" ]; then
+if [ ! -f "$BASE/.deps_v7" ]; then
     echo "▸ Installing dependencies (first run)..."
     pip install -q -U pip setuptools wheel 2>/dev/null
     pip install -q requests httpx "prompt_toolkit>=3" \
         lxml beautifulsoup4 pyyaml Pillow tiktoken \
-        markitdown pypdf python-docx openpyxl tabulate mcp 2>/dev/null
-    touch "$BASE/.deps_v6"
+        markitdown pypdf python-docx openpyxl tabulate mcp \
+        rich textual agentmail 2>/dev/null
+    touch "$BASE/.deps_v7"
 fi
 
 # ── SearXNG in its own venv ──────────────────────────────────────
