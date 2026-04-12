@@ -2873,6 +2873,29 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "shell_session",
+            "description": (
+                "Run a command in a persistent interactive shell session. Unlike run_command, "
+                "environment variables, working directory changes (cd), and shell state persist "
+                "across calls. Use for multi-step workflows where state matters (cd, export, "
+                "source, virtualenv activation). For simple one-off commands, prefer run_command."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "action": {"type": "string", "enum": ["run", "reset"],
+                               "description": "Action: 'run' executes command (default), 'reset' starts a fresh shell"},
+                    "timeout": {"type": "integer", "description": "Timeout for this command in seconds (default: 60)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["command", "result_mode"],
+            },
+        },
+    },
 ]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3167,6 +3190,9 @@ credentials. Skip entirely if AGENTMAIL_API_KEY is set.
 - email_wait_for_message: Poll inbox until a matching message arrives. Use for OTP flows, \
 confirmation emails, reply-dependent workflows. Set from_contains, subject_contains, or \
 thread_id to filter. Prefer this over manual wait + email_list polling loops.
+- shell_session: Persistent shell where cd, export, and shell state survive between calls. \
+Use only when state must persist. For one-off commands, prefer run_command — it is simpler \
+and more predictable.
 </tool_tips>
 
 <error_recovery>
@@ -3464,6 +3490,7 @@ class Agent:
         "email_send":          "_tool_email_send",
         "email_delete":        "_tool_email_delete",
         "email_wait_for_message": "_tool_email_wait_for_message",
+        "shell_session":       "_tool_shell_session",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False, headed=False):
@@ -3512,6 +3539,10 @@ class Agent:
         self._secret_tool_call_ids = set()
         # read_file result cache: (path, mtime_ns, size, start, end) -> result
         self._file_read_cache = {}
+        # Persistent shell session
+        self._shell_master = None
+        self._shell_proc = None
+        self._shell_lock = asyncio.Lock()
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -5439,6 +5470,127 @@ class Agent:
             },
         }, indent=2)
 
+    # ── Persistent shell session ────────────────────────────────
+    async def _ensure_shell(self):
+        import pty, fcntl
+        if self._shell_proc is not None and self._shell_proc.poll() is None:
+            return
+        if self._shell_proc is not None:
+            try:
+                self._shell_proc.terminate()
+            except Exception:
+                pass
+        if self._shell_master is not None:
+            try:
+                os.close(self._shell_master)
+            except Exception:
+                pass
+
+        master, slave = pty.openpty()
+        flags = fcntl.fcntl(master, fcntl.F_GETFL)
+        fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        env = os.environ.copy()
+        env["TERM"] = "dumb"
+        env["PS1"] = ""
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        if self.searxng and self.searxng.url:
+            env["SEARXNG_URL"] = self.searxng.url
+
+        self._shell_proc = subprocess.Popen(
+            ["/bin/bash", "--norc", "--noprofile"],
+            stdin=slave, stdout=slave, stderr=slave,
+            cwd=str(self.cwd), env=env,
+            preexec_fn=os.setsid,
+        )
+        os.close(slave)
+        self._shell_master = master
+        await asyncio.sleep(0.3)
+        self._drain_shell()
+
+    def _drain_shell(self):
+        chunks = []
+        while True:
+            try:
+                data = os.read(self._shell_master, 65536)
+                if data:
+                    chunks.append(data)
+                else:
+                    break
+            except (OSError, BlockingIOError):
+                break
+        return b"".join(chunks).decode(errors="replace")
+
+    async def _tool_shell_session(self, command, action="run", timeout=60, **kw):
+        import select
+        timeout = max(5, min(int(timeout or 60), 600))
+
+        async with self._shell_lock:
+            if action == "reset":
+                if self._shell_proc and self._shell_proc.poll() is None:
+                    self._shell_proc.kill()
+                self._shell_proc = None
+                if self._shell_master is not None:
+                    try:
+                        os.close(self._shell_master)
+                    except Exception:
+                        pass
+                    self._shell_master = None
+                await self._ensure_shell()
+                return json.dumps({"action": "reset", "status": "ok"})
+
+            await self._ensure_shell()
+            if self._shell_proc.poll() is not None:
+                await self._ensure_shell()
+
+            marker = f"__DTT_DONE_{uuid.uuid4().hex[:12]}__"
+            full_cmd = f"{command}\necho {marker} $?\n"
+            os.write(self._shell_master, full_cmd.encode("utf-8"))
+
+            output_parts = []
+            start = time.time()
+            while time.time() - start < timeout:
+                r, _, _ = select.select([self._shell_master], [], [], 0.5)
+                if r:
+                    chunk = self._drain_shell()
+                    if chunk:
+                        output_parts.append(chunk)
+                        combined = "".join(output_parts)
+                        if marker in combined:
+                            break
+                await asyncio.sleep(0.05)
+            else:
+                return json.dumps({
+                    "command": command, "timed_out": True,
+                    "output": "".join(output_parts),
+                }, indent=2)
+
+            full_output = "".join(output_parts)
+            exit_code = -1
+            for line in full_output.splitlines():
+                if marker in line:
+                    parts = line.split(marker)
+                    if len(parts) > 1:
+                        try:
+                            exit_code = int(parts[1].strip())
+                        except ValueError:
+                            pass
+                    break
+
+            clean = full_output
+            if marker in clean:
+                clean = clean[:clean.index(marker)]
+            lines = clean.split("\n", 1)
+            if len(lines) > 1:
+                clean = lines[1]
+            clean = clean.rstrip()
+
+            return json.dumps({
+                "command": command,
+                "exit_code": exit_code,
+                "output": clean,
+            }, ensure_ascii=False, indent=2)
+
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
         """Compact conversation history when context grows too large."""
@@ -6286,6 +6438,18 @@ class Agent:
         self.spinner.stop()
         self.events.emit("exit", code=0 if self._finalized else 1)
         print("\n  ⏳ Cleaning up…", file=sys.stderr)
+        # Clean up persistent shell
+        if self._shell_proc and self._shell_proc.poll() is None:
+            self._shell_proc.terminate()
+            try:
+                self._shell_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._shell_proc.kill()
+        if self._shell_master is not None:
+            try:
+                os.close(self._shell_master)
+            except Exception:
+                pass
         self.searxng.stop()
         await self.browser.close()
         await self.mcp_manager.stop()
