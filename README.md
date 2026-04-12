@@ -16,6 +16,10 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 - Reads and edits files, runs shell commands, makes HTTP requests
 - Connects to your existing MCP servers via `~/.dtt/mcp.json`
 - Loads custom skills from `~/.dtt/skills/<skill-name>/SKILL.md` (Claude Code convention) -- behavioral skills inject directly into the agent's context, while text-processing skills run as isolated sub-tasks
+- Manages its own configuration. Tell it to add an API key or install a skill, and it handles the file edits and reloads itself
+- Sends and receives email through its own inbox via AgentMail
+- Copies to and pastes from your system clipboard, including images
+- Accepts mid-task input. Press any key while it's working to type instructions. Ctrl-Q queues input for after the current step finishes
 - Farms out grunt work to a cheaper model. Asks GPT-5.4 for a second opinion when stuck
 - Saves full conversation threads so you can resume interrupted work
 - Tracks token usage and dollar cost via OpenRouter, with Anthropic prompt caching for cost reduction
@@ -41,6 +45,8 @@ Omit `--prompt` to open a multiline editor. Type your task, then hit Esc+Enter t
 - Docker (for SearXNG)
 - An OpenRouter API key. Get one at [openrouter.ai/keys](https://openrouter.ai/keys). First run prompts for it and saves it to `~/.dtt/env`, or export `OPENROUTER_API_KEY` in your shell to skip the prompt.
 - Optional: a 2Captcha API key for automated captcha solving during browser tasks. First-run setup prompts for this too, or export `TWOCAPTCHA_API_KEY`.
+- Optional: an AgentMail API key for email tools. The agent can set this up for you on first use, or get one at [agentmail.to](https://agentmail.to).
+- Linux clipboard/image support needs `wl-clipboard` (Wayland) or `xclip` (X11).
 
 Everything else is installed automatically into `/tmp/dothething` on first run.
 
@@ -59,6 +65,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 | `--oraclepro` | Use GPT-5.4-pro instead of GPT-5.4 for oracle calls |
 | `--resume ID` | Pick up a previous session by thread ID |
 | `--headed` | Show the browser window for visual debugging |
+| `--orchestrator` | Launch orchestrator mode -- run and manage multiple agents from one terminal |
 | `--verbose` | Show full error tracebacks |
 | `--debug` | Log raw API payloads and cache metrics |
 
@@ -74,9 +81,33 @@ The agent routes Claude Opus through OpenRouter. Every turn, the model decides w
 
 **Thread persistence.** Every session saves to `~/.dtt/threads/` with a timestamped ID. If you interrupt a run or hit the loop limit, resume with `--resume <thread-id>`.
 
-**Skills.** Drop skill directories into `~/.dtt/skills/` to teach the agent new procedures. Each skill is a directory containing a `SKILL.md` file (Claude Code convention). Skills with `allowed-tools` in their frontmatter inject directly into the agent's context, so it follows those instructions while using its own tools. Text-processing skills run via Sonnet as isolated sub-tasks.
+**Skills.** Drop skill directories into `~/.dtt/skills/` to teach the agent new procedures. Each skill is a directory containing a `SKILL.md` file (Claude Code convention). Skills with `allowed-tools` in their frontmatter inject directly into the agent's context, so it follows those instructions while using its own tools. Text-processing skills run via Sonnet as isolated sub-tasks. Skills can also be installed mid-session via the `manage_skill` tool.
 
-**MCP servers.** Configure MCP servers in `~/.dtt/mcp.json` (same format as Claude Code). The agent picks up all connected MCP tools at startup.
+**MCP servers.** Configure MCP servers in `~/.dtt/mcp.json` (same format as Claude Code). The agent picks up all connected MCP tools at startup. Servers can also be added mid-session via the `manage_mcp` tool.
+
+## Orchestrator mode
+
+`--orchestrator` opens a terminal UI for running multiple agents in parallel. You get:
+
+- One line per session showing status, current phase, elapsed time, and cost
+- Expand any session to watch its log in real time
+- Send live input or queued input to a running agent
+- Terminate, copy logs, or copy final output to your clipboard
+- A "smart launcher" that sends your prompt to Opus, which figures out how to split the work and spins up agents for each piece
+
+The smart launcher caps at 16 concurrent agents by default and shows a cost estimate before launching.
+
+## Live input
+
+While the agent is running, press any key to open an input bar at the bottom. Type and press Enter to inject your message immediately. Press Ctrl-Q to queue it until the current step finishes. Press Esc to cancel.
+
+The agent can also ask you questions directly when it needs something it can't figure out on its own -- an OTP code, a preference, or confirmation before a destructive action.
+
+## Email
+
+DTT can send and receive email through AgentMail. First time: the agent signs itself up, you confirm a one-time OTP from your personal email, and the API key is saved for all future sessions. After that, it handles email on its own.
+
+Set `AGENTMAIL_API_KEY` in your shell or let the agent create one via `email_auth`.
 
 ## Models
 
@@ -92,13 +123,17 @@ All calls route through OpenRouter. You only need one API key.
 
 **File operations:** `read_file`, `write_file`, `edit_file`, `batch_read`, `diff_files`
 
-**System:** `run_command`, `run_code`, `glob`, `list_dir`, `search_file`
+**System:** `run_command`, `run_code`, `glob`, `list_dir`, `search_file`, `clipboard_copy`, `clipboard_paste`, `request_user_input`
 
 **Web:** `search_web` (with engine/category targeting), `fetch_page` (Notte-powered scraping), `browser_agent` (full interactive control), `http_request`
 
 **Analysis:** `think`, `oracle`, `delegate`, `analyze_data`, `analyze_image`, `batch_process`
 
 **State:** `notes_add`, `notes_read`, `plan_create`, `plan_update`
+
+**Config:** `manage_config`, `manage_skill`, `manage_mcp`
+
+**Email:** `email_auth`, `email_list_inboxes`, `email_create_inbox`, `email_list`, `email_read`, `email_send`, `email_delete`
 
 **Extensions:** `use_skill` (custom skills), MCP tools (from configured servers)
 
@@ -138,11 +173,23 @@ Configure MCP servers in `~/.dtt/mcp.json`:
 
 The agent discovers and uses all tools exposed by connected MCP servers.
 
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENROUTER_API_KEY` | Yes | Your OpenRouter API key |
+| `TWOCAPTCHA_API_KEY` | No | Enables automated captcha solving |
+| `AGENTMAIL_API_KEY` | No | AgentMail key for email tools |
+| `AGENTMAIL_INBOX_ID` | No | Default AgentMail inbox ID |
+| `AGENTMAIL_HUMAN_EMAIL` | No | Human email for AgentMail OTP verification |
+
+All variables can be saved to `~/.dtt/env` (shell-exported values take precedence). The agent can update this file via `manage_config`.
+
 ## Where things live
 
 | Path | What's there |
 |---|---|
-| `~/.dtt/env` | Saved OpenRouter + optional 2Captcha API keys (mode 0600). Edit or delete to reset. |
+| `~/.dtt/env` | Saved API keys for OpenRouter, 2Captcha, and AgentMail. Mode 0600. The agent can update this via manage_config. |
 | `~/.dtt/threads/` | Saved conversation threads (resume with `--resume`) |
 | `~/.dtt/threads/<id>/cache/` | Per-thread scratch folder (intermediate files, downloads, batch artifacts) |
 | `~/.dtt/skills/<name>/SKILL.md` | User-defined skills (Claude Code convention) |

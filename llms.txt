@@ -4,9 +4,9 @@
 
 dothething uses Claude Opus 4.6 via OpenRouter as its primary model, Claude Sonnet 4.6 for result summarization and delegation, and GPT-5.4 as an oracle for second opinions on hard problems. It requires Python 3, Git, and an OpenRouter API key. Everything else is installed automatically on first run into /tmp/dothething/.
 
-The agent has 25 tools across file operations (read, write, edit, batch read, diff), search (glob, list directory, content search via ripgrep), shell execution, web access (SearXNG search, Notte browser with Camoufox stealth Firefox, browser agent for interactive automation, HTTP requests), vision analysis, working memory (notes), task planning, a reasoning scratchpad, delegation to a cheaper model, an oracle for second opinions, and a finalize tool to end tasks with structured output.
+The agent has 45+ tools across file operations (read, write, edit, batch read, diff), search (glob, list directory, content search via ripgrep), shell execution, web access (SearXNG search, Notte browser with Camoufox stealth Firefox, browser agent for interactive automation, HTTP requests), vision analysis, working memory (notes), task planning, a reasoning scratchpad, delegation to a cheaper model, an oracle for second opinions, self-config management (manage_config, manage_skill, manage_mcp), clipboard access, email via AgentMail, mid-task user input, and a finalize tool to end tasks with structured output.
 
-Key features include result_mode (every tool call can be summarized by Sonnet to manage context window), thread persistence and resume (sessions saved to ~/.dtt/threads/), live cost tracking per model, stagnation detection, file-level locking for parallel edits, and fuzzy whitespace matching for search/replace operations.
+Key features include result_mode (every tool call can be summarized by Sonnet to manage context window), thread persistence and resume (sessions saved to ~/.dtt/threads/), live cost tracking per model, stagnation detection, file-level locking for parallel edits, fuzzy whitespace matching for search/replace operations, an orchestrator mode for running multiple agents in parallel from a terminal UI, and live input injection during execution.
 
 ## Documentation
 
