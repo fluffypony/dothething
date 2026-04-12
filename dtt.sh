@@ -1586,16 +1586,7 @@ async def smart_summarize(raw, goal, headers, cost_tracker, http, tool_name="unk
             trunc = raw[:8000] + "\n[…summarization failed, showing raw head]" if len(raw) > 8000 else raw
             return trunc
 
-# ═══════════════════════════════════════════════════════════════════
-# Secret redaction
-# ═══════════════════════════════════════════════════════════════════
-def _redact_value(key, value):
-    sensitive_suffixes = ("KEY", "SECRET", "TOKEN", "PASSWORD", "API_KEY")
-    if any(key.upper().endswith(s) for s in sensitive_suffixes) or "KEY" in key.upper():
-        if len(value) > 8:
-            return value[:4] + "..." + value[-4:]
-        return "****"
-    return value
+# _redact_value is defined earlier alongside the full secrets redaction module
 
 # ═══════════════════════════════════════════════════════════════════
 # Clipboard — platform-native helpers
@@ -5401,7 +5392,10 @@ class Agent:
             return "Error: no inbox_id configured."
 
         deadline = time.time() + timeout_seconds
-        seen_ids = set()
+        # Track baseline state: on first poll, capture existing items as baseline.
+        # On subsequent polls, only match items NOT in the baseline.
+        # Use (thread_id, message_count_or_timestamp) so new replies in existing threads are detected.
+        baseline_snapshot = None  # Set on first poll
         attempts = 0
 
         while time.time() < deadline:
@@ -5415,53 +5409,88 @@ class Agent:
                     response = client.inboxes.messages.list(inbox, limit=20)
                     items = getattr(response, 'messages', []) or []
 
-                for item in items:
-                    mid = getattr(item, 'message_id', getattr(item, 'thread_id', str(item)))
-                    if mid in seen_ids:
-                        continue
-                    if since_message_id and mid == since_message_id:
-                        break
-
-                    subj = str(getattr(item, 'subject', '')).lower()
-                    sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
+                # Build a fingerprint for each item that changes when new content arrives
+                def _item_fingerprint(item):
+                    mid = getattr(item, 'message_id', '')
                     tid = getattr(item, 'thread_id', '')
-                    body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
+                    ts = str(getattr(item, 'timestamp', getattr(item, 'created_at', '')))
+                    cnt = str(getattr(item, 'message_count', getattr(item, 'num_messages', '')))
+                    preview = str(getattr(item, 'preview', getattr(item, 'text', '')))[:100]
+                    return (mid, tid, ts, cnt, preview)
 
-                    if from_contains and from_contains.lower() not in sender:
-                        continue
-                    if subject_contains and subject_contains.lower() not in subj:
-                        continue
-                    if body_contains and body_contains.lower() not in body_text:
-                        continue
-                    if thread_id and tid != thread_id:
-                        continue
+                if baseline_snapshot is None:
+                    # First poll: capture baseline, don't match anything yet
+                    baseline_snapshot = set(_item_fingerprint(item) for item in items)
+                    # But still check if any current items match filters + since_message_id
+                    # (the message may already be there)
+                    if since_message_id:
+                        # If since_message_id is specified, we only want NEW messages
+                        pass
+                    else:
+                        # No since_message_id: check if any existing items match
+                        for item in items:
+                            subj = str(getattr(item, 'subject', '')).lower()
+                            sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
+                            tid_val = getattr(item, 'thread_id', '')
+                            body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
+                            if from_contains and from_contains.lower() not in sender:
+                                continue
+                            if subject_contains and subject_contains.lower() not in subj:
+                                continue
+                            if body_contains and body_contains.lower() not in body_text:
+                                continue
+                            if thread_id and tid_val != thread_id:
+                                continue
+                            # Match found in initial scan
+                            full_msg_id = getattr(item, 'message_id', None)
+                            full_thread_id = getattr(item, 'thread_id', None)
+                            if full_msg_id or full_thread_id:
+                                try:
+                                    return await self._tool_email_read(
+                                        message_id=full_msg_id, thread_id=full_thread_id, inbox_id=inbox_id)
+                                except Exception:
+                                    pass
+                            return json.dumps({
+                                "found": True, "message_id": str(getattr(item, 'message_id', '')),
+                                "thread_id": tid_val, "subject": getattr(item, 'subject', ''),
+                                "from": getattr(item, 'from_', getattr(item, 'sender', '')),
+                                "attempts": attempts,
+                            }, indent=2, ensure_ascii=False, default=str)
+                else:
+                    # Subsequent polls: look for items with new fingerprints
+                    for item in items:
+                        fp = _item_fingerprint(item)
+                        if fp in baseline_snapshot:
+                            continue  # Already existed at baseline
 
-                    # Match found — try to read full message
-                    full_msg_id = getattr(item, 'message_id', None)
-                    full_thread_id = getattr(item, 'thread_id', None)
-                    if full_msg_id or full_thread_id:
-                        try:
-                            return await self._tool_email_read(
-                                message_id=full_msg_id,
-                                thread_id=full_thread_id,
-                                inbox_id=inbox_id
-                            )
-                        except Exception:
-                            pass
+                        subj = str(getattr(item, 'subject', '')).lower()
+                        sender = str(getattr(item, 'from_', getattr(item, 'sender', ''))).lower()
+                        tid_val = getattr(item, 'thread_id', '')
+                        body_text = str(getattr(item, 'preview', getattr(item, 'text', ''))).lower()
 
-                    return json.dumps({
-                        "found": True,
-                        "message_id": str(mid),
-                        "thread_id": tid,
-                        "subject": getattr(item, 'subject', ''),
-                        "from": getattr(item, 'from_', getattr(item, 'sender', '')),
-                        "date": str(getattr(item, 'timestamp', getattr(item, 'created_at', ''))),
-                        "snippet": (getattr(item, 'preview', getattr(item, 'text', '')) or '')[:500],
-                        "attempts": attempts,
-                    }, indent=2, ensure_ascii=False, default=str)
+                        if from_contains and from_contains.lower() not in sender:
+                            continue
+                        if subject_contains and subject_contains.lower() not in subj:
+                            continue
+                        if body_contains and body_contains.lower() not in body_text:
+                            continue
+                        if thread_id and tid_val != thread_id:
+                            continue
 
-                for item in items:
-                    seen_ids.add(getattr(item, 'message_id', getattr(item, 'thread_id', str(item))))
+                        full_msg_id = getattr(item, 'message_id', None)
+                        full_thread_id = getattr(item, 'thread_id', None)
+                        if full_msg_id or full_thread_id:
+                            try:
+                                return await self._tool_email_read(
+                                    message_id=full_msg_id, thread_id=full_thread_id, inbox_id=inbox_id)
+                            except Exception:
+                                pass
+                        return json.dumps({
+                            "found": True, "message_id": str(getattr(item, 'message_id', '')),
+                            "thread_id": tid_val, "subject": getattr(item, 'subject', ''),
+                            "from": getattr(item, 'from_', getattr(item, 'sender', '')),
+                            "attempts": attempts,
+                        }, indent=2, ensure_ascii=False, default=str)
 
             except Exception:
                 pass
@@ -5557,11 +5586,15 @@ class Agent:
                 await self._ensure_shell()
 
             marker = f"__DTT_DONE_{uuid.uuid4().hex[:12]}__"
+            # Use a completion pattern that distinguishes the actual echo output
+            # (marker followed by a digit) from the echoed command (marker followed by $?)
+            completion_re = re.compile(re.escape(marker) + r' (\d+)')
             full_cmd = f"{command}\necho {marker} $?\n"
             os.write(self._shell_master, full_cmd.encode("utf-8"))
 
             output_parts = []
             start = time.time()
+            match_found = None
             while time.time() - start < timeout:
                 r, _, _ = select.select([self._shell_master], [], [], 0.5)
                 if r:
@@ -5569,7 +5602,8 @@ class Agent:
                     if chunk:
                         output_parts.append(chunk)
                         combined = "".join(output_parts)
-                        if marker in combined:
+                        match_found = completion_re.search(combined)
+                        if match_found:
                             break
                 await asyncio.sleep(0.05)
             else:
@@ -5579,23 +5613,22 @@ class Agent:
                 }, indent=2)
 
             full_output = "".join(output_parts)
-            exit_code = -1
-            for line in full_output.splitlines():
-                if marker in line:
-                    parts = line.split(marker)
-                    if len(parts) > 1:
-                        try:
-                            exit_code = int(parts[1].strip())
-                        except ValueError:
-                            pass
-                    break
+            exit_code = int(match_found.group(1)) if match_found else -1
 
+            # Clean output: remove everything from the marker line onward,
+            # and strip the echoed command at the top
             clean = full_output
-            if marker in clean:
-                clean = clean[:clean.index(marker)]
-            lines = clean.split("\n", 1)
-            if len(lines) > 1:
-                clean = lines[1]
+            # Find the actual completion line (marker + exit code) and cut there
+            if match_found:
+                clean = clean[:match_found.start()]
+            # Remove the echoed command (first occurrence of the command text)
+            cmd_echo = f"echo {marker} $?"
+            if cmd_echo in clean:
+                clean = clean[:clean.index(cmd_echo)]
+            # Also strip the original command echo at the very start
+            first_line_end = clean.find("\n")
+            if first_line_end >= 0 and command.split("\n")[0].strip() in clean[:first_line_end + 1]:
+                clean = clean[first_line_end + 1:]
             clean = clean.rstrip()
 
             return json.dumps({
@@ -6255,6 +6288,7 @@ class Agent:
                             cost=float(inline_cost),
                             cached_tokens=cached_tokens,
                         )
+                        self.events.emit("cost", total=self.cost_tracker.total_cost)
                     else:
                         rid = result.get("id")
                         if rid:
@@ -6541,27 +6575,33 @@ def read_prompt_interactive():
 
 def _send_desktop_notification(title, body, urgency="normal"):
     """Send a cross-platform desktop notification. Best-effort, never raises."""
+    # Sanitize to plain alphanumeric + basic punctuation to prevent injection
+    def _sanitize(s, maxlen=200):
+        return re.sub(r'[^\w\s.,!?:;()\-$/]', '', s)[:maxlen]
     try:
         if sys.platform == "darwin":
-            safe_body = body.replace('"', '\\"').replace("'", "\\'")[:200]
-            safe_title = title.replace('"', '\\"').replace("'", "\\'")
+            safe_body = _sanitize(body)
+            safe_title = _sanitize(title)
             script = f'display notification "{safe_body}" with title "{safe_title}"'
             subprocess.run(["osascript", "-e", script],
                          capture_output=True, timeout=5)
         elif sys.platform.startswith("linux"):
-            subprocess.run(["notify-send", f"--urgency={urgency}", title, body[:500]],
+            subprocess.run(["notify-send", f"--urgency={urgency}",
+                          _sanitize(title), _sanitize(body, 500)],
                          capture_output=True, timeout=5)
         elif sys.platform == "win32":
+            safe_text = _sanitize(f"{title}: {body}")
             ps = (
-                f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, '
-                f'ContentType = WindowsRuntime] > $null; '
-                f'$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(0); '
-                f'$xml.GetElementsByTagName("text")[0].AppendChild($xml.CreateTextNode("{title}: {body[:200]}")) > $null; '
-                f'[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("dothething").Show('
-                f'[Windows.UI.Notifications.ToastNotification]::new($xml))'
+                '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, '
+                'ContentType = WindowsRuntime] > $null; '
+                '$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(0); '
+                '$xml.GetElementsByTagName("text")[0].AppendChild($xml.CreateTextNode($env:DTT_NOTIFY_TEXT)) > $null; '
+                '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("dothething").Show('
+                '[Windows.UI.Notifications.ToastNotification]::new($xml))'
             )
+            env = {**os.environ, "DTT_NOTIFY_TEXT": safe_text}
             subprocess.run(["powershell", "-command", ps],
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=10, env=env)
     except Exception:
         pass
 
@@ -6654,6 +6694,7 @@ class CostGuard:
     """Hard spending limit with checkpoint-and-exit."""
     def __init__(self, max_cost, events):
         self.max_cost = max_cost
+        self.events = events
         self._warned = False
         events.on("cost", self._on_cost)
 
@@ -6661,6 +6702,9 @@ class CostGuard:
         total = kw.get("total", 0.0)
         if self.max_cost and total >= self.max_cost * 0.8 and not self._warned:
             self._warned = True
+            self.events.emit("budget_warning", spent=total, limit=self.max_cost)
+            print(f"\n  ⚠ Budget warning: ${total:.2f} spent of ${self.max_cost:.2f} limit (80%)",
+                  file=sys.stderr)
 
 
 async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
@@ -6755,6 +6799,7 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         # TUI mode: launch Textual full-screen UI
         if tui_mode and not pipe_mode and not worker_mode and sys.stderr.isatty():
             agent.spinner = Spinner(enabled=False)
+            agent.input_handler.stop()  # Stop stdin watcher — Textual owns the terminal
             agent._tui_prompt = prompt
             agent._tui_max_loops = max_loops
             agent._tui_resume_messages = resume_messages
@@ -6799,6 +6844,12 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         if not pipe_mode:
             print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
             print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
+
+        # Pipe mode exit codes: 0=complete, 2=partial, 1=failed
+        if pipe_mode:
+            status_map = {"complete": 0, "partial": 2, "failed": 1}
+            code = status_map.get(agent._final_status, 1)
+            sys.exit(code)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -7288,6 +7339,15 @@ def main():
     oracle_model = ORACLE_PRO if args.oraclepro else ORACLE_DEFAULT
     cwd = str(Path(args.cwd).expanduser().resolve())
 
+    # Early pipe mode validation (before orchestrator or prompt collection)
+    if getattr(args, 'pipe', False):
+        if getattr(args, 'orchestrator', False):
+            print("Error: --pipe and --orchestrator are mutually exclusive.", file=sys.stderr)
+            sys.exit(1)
+        if not args.prompt and not args.positional_prompt and sys.stdin.isatty():
+            print("Error: --pipe requires --prompt, positional prompt, or piped stdin.", file=sys.stderr)
+            sys.exit(1)
+
     if args.orchestrator:
         app = OrchestratorApp(
             api_key=api_key,
@@ -7324,15 +7384,6 @@ def main():
         sys.exit(1)
 
     pipe_mode = getattr(args, 'pipe', False)
-
-    # Pipe mode validation
-    if pipe_mode:
-        if not args.prompt and not args.positional_prompt and sys.stdin.isatty():
-            print("Error: --pipe requires --prompt, positional prompt, or piped stdin.", file=sys.stderr)
-            sys.exit(1)
-        if getattr(args, 'orchestrator', False):
-            print("Error: --pipe and --orchestrator are mutually exclusive.", file=sys.stderr)
-            sys.exit(1)
 
     if not pipe_mode:
         print(f"\n{'─' * 58}", file=sys.stderr)
