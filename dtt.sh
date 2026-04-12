@@ -3430,6 +3430,8 @@ class Agent:
 
         # Start background input handler
         self.input_handler.start()
+        self.events.emit("setup_complete", searxng=bool(self.searxng and self.searxng.url),
+                         mcp_servers=len(self.mcp_manager.servers) if self.mcp_manager else 0)
 
     # ── Tool implementations ─────────────────────────────────────
     async def _tool_read_file(self, path, start_line=None, end_line=None, **kw):
@@ -5239,6 +5241,7 @@ class Agent:
                 },
             ] + recent_messages
 
+            self.events.emit("compaction", old_count=msg_count, new_count=len(self.messages))
             print(
                 f"  Context compacted: {msg_count} -> {len(self.messages)} messages",
                 file=sys.stderr,
@@ -5621,6 +5624,9 @@ class Agent:
                     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
                 except Exception:
                     pass
+
+            self.events.emit("turn_end", turn=loop, finalized=self._finalized,
+                             tool_count=len(tool_calls) if tool_calls else 0)
 
             if self._finalized:
                 for tc, r in zip(tool_calls, results):
@@ -6078,6 +6084,9 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         agent.events.on("finalized", _jsonl_handler)
         agent.events.on("cost", _jsonl_handler)
         agent.events.on("error", _jsonl_handler)
+        agent.events.on("turn_end", _jsonl_handler)
+        agent.events.on("setup_complete", _jsonl_handler)
+        agent.events.on("compaction", _jsonl_handler)
 
     if resume_id:
         agent.thread_logger = ThreadLogger(thread_id=resume_id)
