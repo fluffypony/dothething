@@ -4641,10 +4641,13 @@ class Agent:
                 continue
             m = re.match(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)', stripped)
             if m:
-                val = m.group(2).strip("'\"")
-                # Handle shell-quoted values from shlex.quote
-                if m.group(2).startswith("'") and m.group(2).endswith("'"):
-                    val = m.group(2)[1:-1]
+                raw_val = m.group(2)
+                # Use shlex to properly parse shell-quoted values
+                try:
+                    parsed = shlex.split(raw_val)
+                    val = parsed[0] if parsed else ""
+                except ValueError:
+                    val = raw_val.strip("'\"")
                 env[m.group(1)] = val
 
         if action == "list":
@@ -4770,7 +4773,9 @@ class Agent:
                 env_clean = {}
                 for ek, ev in env.items():
                     if any(s in ek.upper() for s in ("KEY", "SECRET", "TOKEN", "PASSWORD")):
-                        env_var_name = f"MCP_{name.upper()}_{ek.upper()}"
+                        safe_name = re.sub(r'[^A-Za-z0-9]', '_', name.upper())
+                        safe_ek = re.sub(r'[^A-Za-z0-9]', '_', ek.upper())
+                        env_var_name = f"MCP_{safe_name}_{safe_ek}"
                         await self._tool_manage_config(action="set", key=env_var_name, value=ev)
                         env_clean[ek] = f"${{{env_var_name}}}"
                     else:
@@ -4959,31 +4964,33 @@ class Agent:
     async def _tool_email_list_inboxes(self, **kw):
         try:
             client = self.email_manager._ensure_client()
-            inboxes = client.inboxes.list()
+            response = client.inboxes.list()
+            items = getattr(response, 'inboxes', []) or []
             return json.dumps([{
-                "id": getattr(i, 'id', str(i)),
+                "inbox_id": getattr(i, 'inbox_id', str(i)),
                 "email": getattr(i, 'email', ''),
                 "display_name": getattr(i, 'display_name', ''),
-            } for i in inboxes], indent=2, default=str)
+            } for i in items], indent=2, default=str)
         except Exception as e:
             return f"Error listing inboxes: {e}"
 
     async def _tool_email_create_inbox(self, username=None, display_name=None, **kw):
         try:
             client = self.email_manager._ensure_client()
-            kwargs = {}
+            from agentmail.inboxes.types import CreateInboxRequest
+            req_kwargs = {}
             if username:
-                kwargs["username"] = username
+                req_kwargs["username"] = username
             if display_name:
-                kwargs["display_name"] = display_name
-            inbox = client.inboxes.create(**kwargs)
-            inbox_id = getattr(inbox, 'id', str(inbox))
+                req_kwargs["display_name"] = display_name
+            inbox = client.inboxes.create(request=CreateInboxRequest(**req_kwargs) if req_kwargs else None)
+            inbox_id = getattr(inbox, 'inbox_id', str(inbox))
             email = getattr(inbox, 'email', '')
 
             if not os.environ.get("AGENTMAIL_INBOX_ID"):
                 await self._tool_manage_config(action="set", key="AGENTMAIL_INBOX_ID", value=inbox_id)
 
-            return json.dumps({"id": inbox_id, "email": email}, default=str)
+            return json.dumps({"inbox_id": inbox_id, "email": email}, default=str)
         except Exception as e:
             return f"Error creating inbox: {e}"
 
@@ -4994,34 +5001,39 @@ class Agent:
             if not inbox:
                 return "Error: no inbox_id configured. Run email_auth or provide inbox_id."
 
-            kwargs = {"inbox_id": inbox}
+            list_kwargs = {}
             if limit:
-                kwargs["limit"] = int(limit)
+                list_kwargs["limit"] = int(limit)
+            if labels:
+                list_kwargs["labels"] = [labels] if isinstance(labels, str) else labels
+            if include_spam:
+                list_kwargs["include_spam"] = True
 
             try:
-                threads = client.inboxes.threads.list(**kwargs)
+                response = client.inboxes.threads.list(inbox, **list_kwargs)
+                items = getattr(response, 'threads', []) or []
                 results = []
-                for t in threads:
+                for t in items:
                     results.append({
-                        "thread_id": getattr(t, 'id', str(t)),
+                        "thread_id": getattr(t, 'thread_id', str(t)),
                         "subject": getattr(t, 'subject', ''),
                         "from": getattr(t, 'from_', getattr(t, 'sender', '')),
-                        "date": str(getattr(t, 'created_at', getattr(t, 'date', ''))),
-                        "snippet": (getattr(t, 'snippet', getattr(t, 'text', '')) or '')[:200],
+                        "date": str(getattr(t, 'timestamp', getattr(t, 'created_at', ''))),
+                        "snippet": (getattr(t, 'preview', getattr(t, 'text', '')) or '')[:200],
                         "labels": getattr(t, 'labels', []),
-                        "unread": getattr(t, 'unread', None),
                     })
                 return json.dumps(results[:int(limit)], indent=2, ensure_ascii=False, default=str)
             except (AttributeError, TypeError):
-                messages = client.inboxes.messages.list(**kwargs)
+                response = client.inboxes.messages.list(inbox, **list_kwargs)
+                items = getattr(response, 'messages', []) or []
                 results = []
-                for m in messages:
+                for m in items:
                     results.append({
-                        "message_id": getattr(m, 'id', getattr(m, 'message_id', str(m))),
-                        "from": getattr(m, 'from_', getattr(m, 'sender', '')),
+                        "message_id": getattr(m, 'message_id', str(m)),
+                        "from": getattr(m, 'from_', ''),
                         "subject": getattr(m, 'subject', ''),
-                        "date": str(getattr(m, 'created_at', getattr(m, 'date', ''))),
-                        "snippet": (getattr(m, 'text', '') or '')[:200],
+                        "date": str(getattr(m, 'timestamp', getattr(m, 'created_at', ''))),
+                        "snippet": (getattr(m, 'preview', getattr(m, 'text', '')) or '')[:200],
                     })
                 return json.dumps(results[:int(limit)], indent=2, ensure_ascii=False, default=str)
         except Exception as e:
@@ -5035,27 +5047,28 @@ class Agent:
                 return "Error: no inbox_id configured."
 
             if thread_id:
-                thread = client.inboxes.threads.get(inbox_id=inbox, thread_id=thread_id)
+                thread = client.inboxes.threads.get(inbox, thread_id)
+                msgs = getattr(thread, 'messages', []) or []
                 return json.dumps({
                     "thread_id": thread_id,
                     "subject": getattr(thread, 'subject', ''),
                     "messages": [{
-                        "id": getattr(m, 'id', ''),
+                        "message_id": getattr(m, 'message_id', ''),
                         "from": getattr(m, 'from_', ''),
-                        "date": str(getattr(m, 'created_at', '')),
+                        "date": str(getattr(m, 'timestamp', getattr(m, 'created_at', ''))),
                         "text": getattr(m, 'extracted_text', getattr(m, 'text', '')),
                         "html": getattr(m, 'extracted_html', getattr(m, 'html', '')),
-                    } for m in getattr(thread, 'messages', [])],
+                    } for m in msgs],
                     "attachments": [str(a) for a in getattr(thread, 'attachments', [])],
                 }, indent=2, ensure_ascii=False, default=str)
             else:
-                msg = client.inboxes.messages.get(inbox_id=inbox, message_id=message_id)
+                msg = client.inboxes.messages.get(inbox, message_id)
                 return json.dumps({
-                    "id": getattr(msg, 'id', message_id),
-                    "from": getattr(msg, 'from_', getattr(msg, 'sender', '')),
+                    "message_id": getattr(msg, 'message_id', message_id),
+                    "from": getattr(msg, 'from_', ''),
                     "to": getattr(msg, 'to', ''),
                     "subject": getattr(msg, 'subject', ''),
-                    "date": str(getattr(msg, 'created_at', '')),
+                    "date": str(getattr(msg, 'timestamp', getattr(msg, 'created_at', ''))),
                     "text": getattr(msg, 'extracted_text', getattr(msg, 'text', '')),
                     "html": getattr(msg, 'extracted_html', getattr(msg, 'html', '')),
                     "thread_id": getattr(msg, 'thread_id', None),
@@ -5079,35 +5092,30 @@ class Agent:
             to_list = [to] if isinstance(to, str) else to
 
             if reply_to_message_id:
-                kwargs = {
-                    "inbox_id": inbox,
-                    "message_id": reply_to_message_id,
-                    "text": body,
-                }
+                reply_kwargs = {"text": body}
                 if html:
-                    kwargs["html"] = html
-                try:
-                    result = client.inboxes.messages.reply(reply_all=True, **kwargs)
-                except (AttributeError, TypeError):
-                    result = client.inboxes.messages.reply(**kwargs)
+                    reply_kwargs["html"] = html
+                result = client.inboxes.messages.reply(
+                    inbox, reply_to_message_id, reply_all=True, **reply_kwargs
+                )
             else:
-                kwargs = {
-                    "inbox_id": inbox,
+                send_kwargs = {
                     "to": to_list,
                     "subject": subject,
                     "text": body,
                 }
                 if html:
-                    kwargs["html"] = html
+                    send_kwargs["html"] = html
                 if cc:
-                    kwargs["cc"] = [cc] if isinstance(cc, str) else cc
+                    send_kwargs["cc"] = [cc] if isinstance(cc, str) else cc
                 if bcc:
-                    kwargs["bcc"] = [bcc] if isinstance(bcc, str) else bcc
-                result = client.inboxes.messages.send(**kwargs)
+                    send_kwargs["bcc"] = [bcc] if isinstance(bcc, str) else bcc
+                result = client.inboxes.messages.send(inbox, **send_kwargs)
 
             return json.dumps({
                 "status": "sent",
-                "message_id": getattr(result, 'id', getattr(result, 'message_id', str(result))),
+                "message_id": getattr(result, 'message_id', str(result)),
+                "thread_id": getattr(result, 'thread_id', None),
             }, default=str)
         except Exception as e:
             return f"Email send error: {e}"
@@ -5121,7 +5129,7 @@ class Agent:
                 return "Error: no inbox_id configured."
 
             if message_id and not thread_id:
-                msg = client.inboxes.messages.get(inbox_id=inbox, message_id=message_id)
+                msg = client.inboxes.messages.get(inbox, message_id)
                 thread_id = getattr(msg, 'thread_id', None)
                 if not thread_id:
                     return "Error: could not determine thread_id from message. Provide thread_id directly."
@@ -5129,7 +5137,7 @@ class Agent:
             if not thread_id:
                 return "Error: thread_id is required (AgentMail deletion is thread-scoped)."
 
-            client.inboxes.threads.delete(inbox_id=inbox, thread_id=thread_id)
+            client.inboxes.threads.delete(inbox, thread_id, permanent=bool(permanent))
             action_desc = "permanently deleted" if permanent else "moved to trash"
             return f"Thread {thread_id} {action_desc}."
         except Exception as e:
@@ -5361,6 +5369,42 @@ class Agent:
                     "content": f"[Queued user input] {text}"
                 })
                 nudge_count = 0
+            # Poll control file for orchestrator-sent input (worker mode)
+            if hasattr(self, '_control_file') and self._control_file:
+                try:
+                    cf = Path(self._control_file)
+                    if cf.exists():
+                        with open(cf, 'r') as f:
+                            f.seek(self._control_file_pos)
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    ctrl = json.loads(line)
+                                    action = ctrl.get("action", "")
+                                    if action == "live_input":
+                                        self.messages.append({
+                                            "role": "user",
+                                            "content": f"[User input added mid-run] {ctrl.get('text', '')}"
+                                        })
+                                        nudge_count = 0
+                                    elif action == "queued_input":
+                                        self.messages.append({
+                                            "role": "user",
+                                            "content": f"[Queued user input] {ctrl.get('text', '')}"
+                                        })
+                                        nudge_count = 0
+                                    elif action == "terminate":
+                                        self._finalized = True
+                                        self._final_status = "terminated"
+                                        self._final_report = "Terminated by orchestrator."
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+                            self._control_file_pos = f.tell()
+                except Exception:
+                    pass
 
             await self._maybe_compact_context()
             self.events.emit("turn_start", turn=loop)
@@ -6009,10 +6053,15 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed)
 
     # Worker mode: emit JSONL events to stdout for orchestrator consumption
+    control_file = getattr(args, '_control_file', None) if hasattr(args, '_control_file') else None
     if worker_mode:
         agent.spinner = Spinner(enabled=False)
         agent.input_handler = InputHandler(agent)
         agent.input_handler.enabled = False
+        # Set up control file polling for orchestrator-sent input
+        if control_file:
+            agent._control_file = control_file
+            agent._control_file_pos = 0
         def _jsonl_handler(event, **data):
             payload = {"event": event, "ts": time.time()}
             payload.update({k: str(v) if not isinstance(v, (int, float, bool, type(None))) else v for k, v in data.items()})
@@ -6354,9 +6403,16 @@ class OrchestratorApp:
 
                         if event_type == "status":
                             session["phase"] = event.get("phase", "")
-                        elif event_type == "final":
+                        elif event_type == "turn_start":
+                            session["phase"] = f"turn {event.get('turn', '?')}"
+                        elif event_type == "model_start":
+                            session["phase"] = "thinking"
+                        elif event_type == "tool_start":
+                            session["phase"] = f"tool: {event.get('name', '?')}"
+                        elif event_type == "finalized":
                             session["final_report"] = event.get("report", "")
                             session["final_files"] = event.get("files", [])
+                            session["phase"] = "finalized"
                         elif event_type == "cost":
                             session["cost"] = event.get("total", 0)
                         elif event_type == "exit":
