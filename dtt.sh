@@ -358,49 +358,72 @@ def count_message_tokens(messages):
     return total
 
 # ═══════════════════════════════════════════════════════════════════
+# EventBus — lightweight pub/sub for agent lifecycle events
+# ═══════════════════════════════════════════════════════════════════
+class EventBus:
+    def __init__(self):
+        self._handlers = {}
+
+    def on(self, event, handler):
+        self._handlers.setdefault(event, []).append(handler)
+
+    def off(self, event, handler):
+        if event in self._handlers:
+            self._handlers[event] = [h for h in self._handlers[event] if h is not handler]
+
+    def emit(self, event, **data):
+        for h in self._handlers.get(event, []):
+            try:
+                h(event=event, **data)
+            except Exception:
+                pass
+
+# ═══════════════════════════════════════════════════════════════════
 # Spinner
 # ═══════════════════════════════════════════════════════════════════
 class Spinner:
-    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     def __init__(self, enabled=True):
         self.enabled = enabled and sys.stderr.isatty()
-        self._thread = None
-        self._stop = threading.Event()
+        self._status = None
+        self._console = None
+        self._start_time = None
         self._msg = ""
-        self._lock = threading.Lock()
 
     def start(self, msg="Thinking..."):
         if not self.enabled:
             return
         self.stop()
-        with self._lock:
-            self._msg = msg
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self):
-        i = 0
-        while not self._stop.is_set():
-            with self._lock:
-                msg = self._msg
-            frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stderr.write(f"\r\033[K{frame} {msg}")
+        self._msg = msg
+        self._start_time = time.time()
+        try:
+            from rich.console import Console
+            self._console = Console(stderr=True)
+            self._status = self._console.status(
+                f"[bold cyan]{msg}[/]",
+                spinner="dots",
+                spinner_style="cyan",
+            )
+            self._status.start()
+        except ImportError:
+            sys.stderr.write(f"\r\033[K⠋ {msg}")
             sys.stderr.flush()
-            self._stop.wait(0.1)
-            i += 1
-        sys.stderr.write("\r\033[K")
-        sys.stderr.flush()
 
     def update(self, msg):
-        with self._lock:
-            self._msg = msg
+        self._msg = msg
+        if self._status:
+            elapsed = time.time() - self._start_time if self._start_time else 0
+            self._status.update(f"[bold cyan]{msg}[/] [dim]({elapsed:.1f}s)[/]")
+        elif self.enabled:
+            sys.stderr.write(f"\r\033[K⠋ {msg}")
+            sys.stderr.flush()
 
     def stop(self):
-        if self._thread and self._thread.is_alive():
-            self._stop.set()
-            self._thread.join(timeout=2)
-        self._thread = None
+        if self._status:
+            self._status.stop()
+            self._status = None
+        elif self.enabled:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
 
 # ═══════════════════════════════════════════════════════════════════
 # SearXNG — lifecycle management (separate venv)
