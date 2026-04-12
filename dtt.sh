@@ -978,6 +978,7 @@ class SkillManager:
         self._load_skills()
 
     def _load_skills(self):
+        self.skills = {}
         if not self.SKILL_DIR.exists():
             return
         for md_file in self.SKILL_DIR.rglob("SKILL.md"):
@@ -3383,6 +3384,10 @@ class Agent:
         # For serial-work detection and pre-finalize validation
         self._tool_call_patterns = []
         self._browser_agent_used = False
+        # Compositional system prompt fields
+        self._base_system_prompt = ""
+        self._skills_section = ""
+        self._mcp_section = ""
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -5262,7 +5267,7 @@ class Agent:
             if self.thread_logger
             else "(unavailable)"
         )
-        sys_prompt = SYSTEM_PROMPT.format(
+        self._base_system_prompt = SYSTEM_PROMPT.format(
             cwd=self.cwd,
             platform=f"{plat.system()} {plat.machine()}",
             thread_id=thread_id,
@@ -5272,37 +5277,10 @@ class Agent:
             venv_path=venv_path,
         )
 
-        # Classify skills as inline vs callable
-        inline_skills = []
-        callable_skills = []
-        for name, s in self.skill_manager.skills.items():
-            fm = s.get("frontmatter", {})
-            if fm.get("disable-model-invocation", False):
-                continue
-            if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
-                inline_skills.append((name, s))
-            else:
-                callable_skills.append((name, s.get("description", "")))
-
-        if inline_skills:
-            sys_prompt += "\n<inline_skills>\n"
-            sys_prompt += "The following skill instructions are active. Apply them directly to your work when relevant.\n\n"
-            for name, s in inline_skills:
-                sys_prompt += f"## Skill: {name}\n"
-                sys_prompt += f"{s.get('content', '')}\n\n"
-            sys_prompt += "</inline_skills>\n"
-
-        if callable_skills:
-            sys_prompt += "\n<available_skills>\nCallable skills (invoke via use_skill tool):\n"
-            for name, desc in callable_skills:
-                sys_prompt += f"  - {name}: {desc}\n"
-            sys_prompt += "Use mode='delegate' for isolated sub-task execution via Sonnet, or mode='read' to load the full instructions into your own context.\n"
-            sys_prompt += "</available_skills>\n"
-
-        # Append dynamic MCP section
-        mcp_section = self.mcp_manager.get_prompt_section()
-        if mcp_section:
-            sys_prompt += "\n" + mcp_section + "\n"
+        # Build skills and MCP sections via shared helpers
+        self._skills_section = self._build_skills_section()
+        self._mcp_section = self._build_mcp_section()
+        sys_prompt = self._base_system_prompt + self._skills_section + self._mcp_section
 
         # System message is a two-block array: static (cached) + temporal (refreshed per-turn).
         # cache_control sits on the static block only, so the temporal block can change every
@@ -5665,7 +5643,7 @@ class Agent:
         return {"type": "text", "text": text}
 
     def _refresh_temporal_block(self):
-        # Rewrite the trailing temporal block in the system message so the model
+        # Rewrite the temporal block in the system message so the model
         # sees a live wall-clock on every turn. The cache_control sits on the
         # static block only, so updating this one does not invalidate the cache.
         if not self.messages:
@@ -5676,23 +5654,16 @@ class Agent:
         content = sysmsg.get("content")
         if not isinstance(content, list) or not content:
             return
-        content[-1] = self._build_temporal_block()
+        for i, block in enumerate(content):
+            if isinstance(block, dict) and "<current_datetime>" in block.get("text", ""):
+                content[i] = self._build_temporal_block()
+                return
+        # Fallback: append if not found
+        content.append(self._build_temporal_block())
 
-    def _rebuild_system_prompt(self):
-        """Rebuild the static system prompt with current skills/MCP/context."""
-        if not self.messages:
-            return
-        sysmsg = self.messages[0]
-        if sysmsg.get("role") != "system":
-            return
-        content = sysmsg.get("content")
-        if not isinstance(content, list) or len(content) < 2:
-            return
-
-        # Re-scan skills
+    def _build_skills_section(self):
+        """Build the skills text for the system prompt."""
         self.skill_manager._load_skills()
-
-        # Rebuild inline skills text
         inline_skills = []
         callable_skills = []
         for name, s in self.skill_manager.skills.items():
@@ -5704,45 +5675,44 @@ class Agent:
             else:
                 callable_skills.append((name, s.get("description", "")))
 
-        # Build skills section
-        skills_section = ""
+        section = ""
         if inline_skills:
-            skills_section += "\n<inline_skills>\n"
+            section += "\n<inline_skills>\n"
+            section += "The following skill instructions are active. Apply them directly to your work when relevant.\n\n"
             for name, s in inline_skills:
-                skills_section += f"\n## Skill: {name}\n{s['content']}\n"
-            skills_section += "</inline_skills>\n"
+                section += f"## Skill: {name}\n{s.get('content', '')}\n\n"
+            section += "</inline_skills>\n"
         if callable_skills:
-            skills_section += "\n<available_skills>\nCall use_skill to invoke:\n"
+            section += "\n<available_skills>\nCallable skills (invoke via use_skill tool):\n"
             for name, desc in callable_skills:
-                skills_section += f"- {name}: {desc}\n"
-            skills_section += "</available_skills>\n"
+                section += f"  - {name}: {desc}\n"
+            section += "Use mode='delegate' for isolated sub-task execution via Sonnet, or mode='read' to load the full instructions into your own context.\n"
+            section += "</available_skills>\n"
+        return section
 
-        # Build MCP section — reuse get_prompt_section() which handles the
-        # tools_raw dict correctly, then wrap it in <mcp_tools> tags for
-        # consistent stripping on the next rebuild.
-        mcp_section = ""
-        if self.mcp_manager.servers:
-            raw_mcp = self.mcp_manager.get_prompt_section()
-            if raw_mcp:
-                # get_prompt_section uses <mcp_servers> tags; rewrap as <mcp_tools>
-                inner = raw_mcp.replace("<mcp_servers>", "").replace("</mcp_servers>", "").strip()
-                mcp_section = f"\n<mcp_tools>\n{inner}\n</mcp_tools>\n"
+    def _build_mcp_section(self):
+        """Build the MCP tools text for the system prompt."""
+        mcp_text = self.mcp_manager.get_prompt_section()
+        return f"\n{mcp_text}\n" if mcp_text else ""
 
-        # Reassemble the static block text
+    def _rebuild_system_prompt(self):
+        """Rebuild the static system prompt with current skills/MCP/context."""
+        if not self.messages or not self._base_system_prompt:
+            return
+        sysmsg = self.messages[0]
+        if sysmsg.get("role") != "system":
+            return
+        content = sysmsg.get("content")
+        if not isinstance(content, list) or not content:
+            return
+
+        self._skills_section = self._build_skills_section()
+        self._mcp_section = self._build_mcp_section()
+        composed = self._base_system_prompt + self._skills_section + self._mcp_section
+
         static_block = content[0]
         if isinstance(static_block, dict) and "text" in static_block:
-            base_text = static_block["text"]
-            # Strip old skills/MCP sections if present
-            for tag in ["<inline_skills>", "<available_skills>", "<mcp_tools>", "<mcp_servers>"]:
-                end_tag = tag.replace("<", "</")
-                while tag in base_text:
-                    start = base_text.find(tag)
-                    end = base_text.find(end_tag)
-                    if end == -1:
-                        break
-                    base_text = base_text[:start] + base_text[end + len(end_tag):]
-            base_text = base_text.rstrip() + "\n" + skills_section + mcp_section
-            static_block["text"] = base_text
+            static_block["text"] = composed
 
     # ── Model call with retry ────────────────────────────────────
     async def _call_model(self, retries=3):
