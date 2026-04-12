@@ -835,6 +835,62 @@ class CostTracker:
         return by_model
 
 # ═══════════════════════════════════════════════════════════════════
+# Secrets Redaction — protect sensitive values in logs and debug output
+# ═══════════════════════════════════════════════════════════════════
+_SENSITIVE_KEY_RE = re.compile(
+    r'(api[_-]?key|secret|token|password|authorization|cookie|otp[_-]?code)',
+    re.IGNORECASE
+)
+_SENSITIVE_VALUE_RE = re.compile(
+    r'(sk-or-[a-zA-Z0-9\-_]{20,}|sk-[a-zA-Z0-9\-_]{20,}|Bearer\s+[A-Za-z0-9\-_.]+)',
+)
+
+def _collect_secret_values():
+    secrets = set()
+    for env_key in ("OPENROUTER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
+        val = os.environ.get(env_key, "")
+        if val and len(val) > 8:
+            secrets.add(val)
+    return secrets
+
+def _redact_secrets_in_str(text, secret_values=None):
+    if not isinstance(text, str):
+        return text
+    if secret_values:
+        for secret in secret_values:
+            if secret in text:
+                redacted = secret[:4] + "..." + secret[-4:] if len(secret) > 12 else "****"
+                text = text.replace(secret, redacted)
+    text = _SENSITIVE_VALUE_RE.sub(
+        lambda m: m.group(0)[:6] + "..." + m.group(0)[-4:] if len(m.group(0)) > 12 else "****",
+        text
+    )
+    return text
+
+def _redact_value(key, val):
+    if not isinstance(val, str) or not val:
+        return val
+    if _SENSITIVE_KEY_RE.search(key):
+        return val[:4] + "..." + val[-4:] if len(val) > 12 else "****"
+    return val
+
+def _redact_for_log(obj, secret_values=None):
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            if isinstance(v, str) and _SENSITIVE_KEY_RE.search(k):
+                result[k] = _redact_value(k, v)
+            else:
+                result[k] = _redact_for_log(v, secret_values)
+        return result
+    elif isinstance(obj, list):
+        return [_redact_for_log(item, secret_values) for item in obj]
+    elif isinstance(obj, str):
+        return _redact_secrets_in_str(obj, secret_values)
+    return obj
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Thread Logger — persist conversations to ~/.dtt/threads/
 # ═══════════════════════════════════════════════════════════════════
 class ThreadLogger:
@@ -854,23 +910,57 @@ class ThreadLogger:
         self.cache_dir = self.thread_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_messages(self, messages):
-        """Save the full message history."""
+    def save_messages(self, messages, secret_tool_call_ids=None):
+        """Save the full message history with secrets redacted."""
+        import copy
         path = self.thread_dir / "messages.json"
-        # Serialize, handling non-serializable content gracefully
+        secret_values = _collect_secret_values()
+        secret_ids = secret_tool_call_ids or set()
+
         serializable = []
         for msg in messages:
             m = dict(msg)
+
             # Truncate very large tool results to avoid multi-GB thread files
             if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > 200_000:
                 m["content"] = m["content"][:200_000] + "\n[…truncated in thread log]"
+
+            # Redact secret user input results
+            if m.get("role") == "tool" and m.get("tool_call_id") in secret_ids:
+                m["content"] = "[REDACTED SECRET INPUT]"
+
+            # Redact string content
+            if isinstance(m.get("content"), str):
+                m["content"] = _redact_secrets_in_str(m["content"], secret_values)
+
+            # Redact tool_calls arguments
+            if m.get("tool_calls"):
+                m["tool_calls"] = copy.deepcopy(m["tool_calls"])
+                for tc in m["tool_calls"]:
+                    try:
+                        fn = tc.get("function", {})
+                        args_str = fn.get("arguments", "")
+                        if isinstance(args_str, str):
+                            args = json.loads(args_str)
+                            for k, v in args.items():
+                                if isinstance(v, str):
+                                    args[k] = _redact_value(k, v)
+                                elif isinstance(v, dict):
+                                    for ek, ev in v.items():
+                                        if isinstance(ev, str):
+                                            v[ek] = _redact_value(ek, ev)
+                            fn["arguments"] = json.dumps(args)
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass
+
             serializable.append(m)
         path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def save_meta(self, meta):
-        """Save metadata (model, cwd, prompt, etc.)."""
+        """Save metadata (model, cwd, prompt, etc.) with secrets redacted."""
         path = self.thread_dir / "meta.json"
-        path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        redacted = _redact_for_log(meta, _collect_secret_values())
+        path.write_text(json.dumps(redacted, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load_messages(self):
         path = self.thread_dir / "messages.json"
@@ -3388,6 +3478,8 @@ class Agent:
         self._base_system_prompt = ""
         self._skills_section = ""
         self._mcp_section = ""
+        # Track tool_call_ids with secret=True for redaction
+        self._secret_tool_call_ids = set()
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -5345,7 +5437,7 @@ class Agent:
                     "started_at": now.isoformat(),
                     "thread_id": thread_id,
                 })
-            self.thread_logger.save_messages(self.messages)
+            self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
 
         nudge_count = 0
         for loop in range(max_loops):
@@ -5462,7 +5554,7 @@ class Agent:
                     ),
                 })
                 if self.thread_logger:
-                    self.thread_logger.save_messages(self.messages)
+                    self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
                 continue
             nudge_count = 0
 
@@ -5491,7 +5583,7 @@ class Agent:
                                "If you're done, call finalize alone next turn. If not, keep working.",
                 })
                 if self.thread_logger:
-                    self.thread_logger.save_messages(self.messages)
+                    self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
                 continue
 
             assistant_msg = {"role": "assistant"}
@@ -5614,7 +5706,7 @@ class Agent:
 
             # Save after every tool execution (messages + plan/notes state)
             if self.thread_logger:
-                self.thread_logger.save_messages(self.messages)
+                self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
                 state = {
                     "plan_items": self.plan.items if self.plan else [],
                     "notes_entries": self.notes._entries if self.notes else [],
@@ -5720,6 +5812,22 @@ class Agent:
         if isinstance(static_block, dict) and "text" in static_block:
             static_block["text"] = composed
 
+    def _redact_debug_str(self, text):
+        """Redact known secrets from a debug string."""
+        for env_key in ("OPENROUTER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
+            val = os.environ.get(env_key, "")
+            if val and len(val) > 8:
+                text = text.replace(val, val[:4] + "..." + val[-4:])
+        auth_val = self.headers.get("Authorization", "")
+        if auth_val and len(auth_val) > 15:
+            text = text.replace(auth_val, auth_val[:11] + "..." + auth_val[-4:])
+        text = re.sub(r'(Bearer\s+)[A-Za-z0-9\-_.]+', r'\1[REDACTED]', text)
+        text = re.sub(
+            r'(["\'](?:api[_-]?key|secret|token|password)["\']:\s*["\'])[^"\']+(["\'])',
+            r'\1[REDACTED]\2', text, flags=re.IGNORECASE
+        )
+        return text
+
     # ── Model call with retry ────────────────────────────────────
     async def _call_model(self, retries=3):
         self._refresh_temporal_block()
@@ -5740,6 +5848,7 @@ class Agent:
                 }
                 if self.debug:
                     dbg = json.dumps(payload, ensure_ascii=False)[:8000]
+                    dbg = self._redact_debug_str(dbg)
                     print(f"[debug] Request: {dbg}", file=sys.stderr)
 
                 resp = await self.http.post(
@@ -5761,6 +5870,7 @@ class Agent:
 
                 if self.debug:
                     dbg_r = json.dumps(result, ensure_ascii=False)[:4000]
+                    dbg_r = self._redact_debug_str(dbg_r)
                     print(f"[debug] Response: {dbg_r}", file=sys.stderr)
 
                 usage = result.get("usage", {})
@@ -5871,6 +5981,10 @@ class Agent:
                 break
             self.spinner.update(f"⚡ {name}" + (f" → {brief}" if brief else ""))
             self.events.emit("tool_start", name=name, args=brief)
+
+            # Track secret request_user_input calls for redaction
+            if name == "request_user_input" and args.get("secret"):
+                self._secret_tool_call_ids.add(tc["id"])
 
             # MCP tool routing
             if name.startswith("mcp__"):
@@ -6128,7 +6242,7 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
     finally:
         # Final save
         if agent.thread_logger:
-            agent.thread_logger.save_messages(agent.messages)
+            agent.thread_logger.save_messages(agent.messages, agent._secret_tool_call_ids)
         await agent.cleanup()
         print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
         print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
