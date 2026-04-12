@@ -42,7 +42,6 @@ Omit `--prompt` to open a multiline editor. Type your task, then hit Esc+Enter t
 
 - macOS or Linux
 - Python 3.11+
-- Docker (for SearXNG)
 - An OpenRouter API key. Get one at [openrouter.ai/keys](https://openrouter.ai/keys). First run prompts for it and saves it to `~/.dtt/env`, or export `OPENROUTER_API_KEY` in your shell to skip the prompt.
 - Optional: a 2Captcha API key for automated captcha solving during browser tasks. First-run setup prompts for this too, or export `TWOCAPTCHA_API_KEY`.
 - Optional: an AgentMail API key for email tools. The agent can set this up for you on first use, or get one at [agentmail.to](https://agentmail.to).
