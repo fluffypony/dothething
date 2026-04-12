@@ -3480,6 +3480,8 @@ class Agent:
         self._mcp_section = ""
         # Track tool_call_ids with secret=True for redaction
         self._secret_tool_call_ids = set()
+        # read_file result cache: (path, mtime_ns, size, start, end) -> result
+        self._file_read_cache = {}
 
     async def _get_file_lock(self, path):
         async with self._file_locks_lock:
@@ -3532,6 +3534,17 @@ class Agent:
             return "Error: Direct file access to ~/.dtt/env is blocked for security. Use the manage_config tool instead."
         if not p.exists():
             return f"Error: File not found: {path}"
+        # Cache check for regular files
+        cache_key = None
+        if p.is_file():
+            try:
+                stat = p.stat()
+                cache_key = (str(p), stat.st_mtime_ns, stat.st_size, start_line, end_line)
+                cached = self._file_read_cache.get(cache_key)
+                if cached is not None:
+                    return cached
+            except OSError:
+                pass
         if p.is_dir():
             entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name))
             listing = []
@@ -3603,6 +3616,8 @@ class Agent:
             else:
                 header = f"[File: {path} | {total_lines} lines | {len(data)} bytes]"
                 text = header + "\n" + text
+            if cache_key:
+                self._file_read_cache[cache_key] = text
             return text
         except Exception as e:
             return f"Error reading {path}: {e}"
@@ -3623,6 +3638,11 @@ class Agent:
                 with p.open(op, encoding="utf-8") as f:
                     f.write(content)
                 after_hash = file_sha256(p)
+                # Invalidate read cache for this path
+                self._file_read_cache = {
+                    k: v for k, v in self._file_read_cache.items()
+                    if not (isinstance(k, tuple) and k[0] == str(p))
+                }
                 return json.dumps({
                     "path": str(p),
                     "mode": mode,
@@ -3720,6 +3740,11 @@ class Agent:
                 if updated == original:
                     return "Warning: No changes were applied."
                 p.write_text(updated, encoding="utf-8")
+                # Invalidate read cache for this path
+                self._file_read_cache = {
+                    k: v for k, v in self._file_read_cache.items()
+                    if not (isinstance(k, tuple) and k[0] == str(p))
+                }
                 diff = "\n".join(difflib.unified_diff(
                     original.splitlines(), updated.splitlines(),
                     fromfile=str(p), tofile=str(p), lineterm="",
@@ -4010,6 +4035,38 @@ class Agent:
                     f"2. Use plan_update to mark items as not applicable\n"
                     f"3. Call finalize with status='partial' and explain what's missing\n"
                     f"Review with plan_remaining, then decide."
+                )
+
+        # Pre-finalize validation: check deliverable files exist and are valid
+        if files and (status or "complete") == "complete":
+            validation_issues = []
+            for file_path in files:
+                fp = resolve_path(self.cwd, file_path)
+                if not fp.exists():
+                    validation_issues.append(f"File not found: {file_path}")
+                elif fp.stat().st_size == 0:
+                    validation_issues.append(f"File is empty (0 bytes): {file_path}")
+                elif fp.suffix.lower() == ".json":
+                    try:
+                        content = fp.read_text(encoding="utf-8")
+                        json.loads(content)
+                    except json.JSONDecodeError as e:
+                        validation_issues.append(f"Invalid JSON in {file_path}: {e}")
+                elif fp.suffix.lower() == ".csv":
+                    try:
+                        content = fp.read_text(encoding="utf-8")
+                        csv_lines = [l for l in content.strip().splitlines() if l.strip()]
+                        if len(csv_lines) < 2:
+                            validation_issues.append(
+                                f"CSV has only {len(csv_lines)} line(s) (expected header + data): {file_path}")
+                    except Exception as e:
+                        validation_issues.append(f"Error reading CSV {file_path}: {e}")
+            if validation_issues:
+                return (
+                    "WARNING: Deliverable file validation found issues:\n"
+                    + "\n".join(f"  - {i}" for i in validation_issues)
+                    + "\n\nFix these issues before finalizing, or set status='partial' "
+                    "and explain what's incomplete in the report."
                 )
 
         self._finalized = True
