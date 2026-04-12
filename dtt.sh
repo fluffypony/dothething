@@ -6344,7 +6344,9 @@ class OrchestratorApp:
                 sid = orchestrator.next_id
                 orchestrator.next_id += 1
 
-                control_file = tempfile.mktemp(suffix=f"_dtt_ctl_{sid}.jsonl")
+                ctl_fd, control_file = tempfile.mkstemp(suffix=f"_dtt_ctl_{sid}.jsonl")
+                os.close(ctl_fd)
+                os.chmod(control_file, 0o600)
 
                 cmd = [
                     sys.executable, str(orchestrator.agent_py_path),
@@ -6446,6 +6448,11 @@ class OrchestratorApp:
                         table.update_cell(str(sid), "Status", session["status"])
                     except Exception:
                         pass
+                # Clean up control file
+                try:
+                    os.unlink(session.get("control_file", ""))
+                except OSError:
+                    pass
 
             async def _do_smart_launch(self, meta_prompt):
                 self.notify("Smart launcher processing...", severity="information")
