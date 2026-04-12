@@ -6840,10 +6840,18 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
 # Orchestrator Mode — Textual TUI for managing parallel agents
 # ═══════════════════════════════════════════════════════════════════
 ORCHESTRATOR_SYSTEM_PROMPT = """\
-You are the DTT Orchestrator Smart Launcher. Your job is to decompose a user's \
-high-level task into independent sub-tasks and launch worker agents for each.
+You are the DTT Orchestrator. You decompose tasks, launch worker agents, receive \
+their results, and take follow-up actions until the job is done.
 
-You have one tool: launch_agent.
+You operate in a loop: you call tools, receive results, and decide what to do next. \
+When launch_agent is called, it blocks until that agent finishes and returns its \
+final report. Multiple launch_agent calls in one turn run in parallel.
+
+Tools available:
+- launch_agent: Launch a DTT worker agent. Returns the agent's final report when done.
+- read_file: Read a file from the filesystem.
+- write_file: Write content to a file (creates parent directories).
+- run_command: Run a shell command (120s timeout).
 
 Rules:
 - Each launched agent runs independently with no shared state. Include ALL context \
@@ -6854,8 +6862,75 @@ rather than one agent per row.
 - Always include expected output format and acceptance criteria in each sub-prompt.
 - Include a stop condition in each sub-prompt.
 - Cap total agents at {max_workers}. If more parallelism is needed, batch items.
+- After all agents return, continue working: collate results, write output files, \
+run commands, or launch follow-up agents as needed.
+- When all work is complete, respond with a final summary and no tool calls."""
 
-When you are done launching, output a summary of what you launched."""
+
+ORCHESTRATOR_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "launch_agent",
+            "description": (
+                "Launch a new autonomous DTT agent. Blocks until the agent completes "
+                "and returns its final report. Multiple calls in one turn run in parallel."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Complete, self-contained task prompt"},
+                    "label": {"type": "string", "description": "Short label for the session"},
+                    "max_loops": {"type": "integer", "description": "Max turns (optional, default 200)"},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file and return its contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative to working directory, or absolute)"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file. Creates parent directories if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative to working directory, or absolute)"},
+                    "content": {"type": "string", "description": "Content to write"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a shell command and return stdout+stderr. Timeout: 120s.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+]
 
 
 class OrchestratorApp:
@@ -7095,6 +7170,7 @@ class OrchestratorApp:
                     "final_report": "",
                     "final_files": [],
                     "expanded": False,
+                    "done_event": asyncio.Event(),
                 }
                 orchestrator.sessions[sid] = session
 
@@ -7177,6 +7253,8 @@ class OrchestratorApp:
                         table.update_cell(str(sid), "Status", session["status"])
                     except Exception:
                         pass
+                # Signal completion for smart launcher awaits
+                session["done_event"].set()
                 # Clean up control file
                 try:
                     os.unlink(session.get("control_file", ""))
@@ -7213,88 +7291,198 @@ class OrchestratorApp:
                             f"All agents finished.\n\n{agent_summaries}"
                         ))
 
+            async def _launch_and_await_agent(self, prompt, label=None, max_loops=None):
+                """Launch an agent and block until it completes. Returns its final report."""
+                sid = await self._do_launch(prompt, label=label, max_loops=max_loops)
+                if sid is None:
+                    return "ERROR: Worker limit reached, could not launch agent."
+
+                session = orchestrator.sessions[sid]
+                await session["done_event"].wait()
+
+                status = session["status"]
+                report = session.get("final_report", "")
+                files = session.get("final_files", [])
+                cost = session.get("cost", 0)
+
+                parts = [f"Agent {sid} ({session.get('label', f'Agent {sid}')}) — {status}"]
+                if report:
+                    parts.append(f"Report:\n{report}")
+                if files:
+                    parts.append(f"Files created: {', '.join(str(f) for f in files)}")
+                parts.append(f"Cost: ${cost:.2f}")
+                return "\n".join(parts)
+
+            async def _exec_orchestrator_tool(self, name, args):
+                """Execute a non-launch orchestrator tool (read_file, write_file, run_command)."""
+                if name == "read_file":
+                    path = args.get("path", "")
+                    if not os.path.isabs(path):
+                        path = os.path.join(str(orchestrator.cwd), path)
+                    try:
+                        with open(path, "r") as f:
+                            content = f.read()
+                        if len(content) > 100000:
+                            content = content[:100000] + "\n... (truncated at 100k chars)"
+                        return content if content else "(empty file)"
+                    except Exception as e:
+                        return f"Error reading {path}: {e}"
+
+                elif name == "write_file":
+                    path = args.get("path", "")
+                    content = args.get("content", "")
+                    if not os.path.isabs(path):
+                        path = os.path.join(str(orchestrator.cwd), path)
+                    try:
+                        parent = os.path.dirname(path)
+                        if parent:
+                            os.makedirs(parent, exist_ok=True)
+                        with open(path, "w") as f:
+                            f.write(content)
+                        return f"Wrote {len(content)} chars to {path}"
+                    except Exception as e:
+                        return f"Error writing {path}: {e}"
+
+                elif name == "run_command":
+                    cmd = args.get("command", "")
+                    try:
+                        proc = await asyncio.create_subprocess_shell(
+                            cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            cwd=str(orchestrator.cwd),
+                        )
+                        stdout, stderr = await asyncio.wait_for(
+                            proc.communicate(), timeout=120)
+                        output = stdout.decode(errors="replace")
+                        if stderr:
+                            output += "\nSTDERR:\n" + stderr.decode(errors="replace")
+                        if len(output) > 100000:
+                            output = output[:100000] + "\n... (truncated)"
+                        return output if output else "(no output)"
+                    except asyncio.TimeoutError:
+                        return "Error: command timed out after 120s"
+                    except Exception as e:
+                        return f"Error running command: {e}"
+
+                return f"Unknown tool: {name}"
+
             async def _do_smart_launch(self, meta_prompt):
                 self.notify("Smart launcher processing...", severity="information")
                 self.run_worker(self._smart_launch_worker(meta_prompt), exclusive=True)
 
             async def _smart_launch_worker(self, meta_prompt):
-                tools = [{
-                    "type": "function",
-                    "function": {
-                        "name": "launch_agent",
-                        "description": "Launch a new autonomous DTT agent with the given prompt.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "prompt": {"type": "string", "description": "Complete, self-contained task prompt"},
-                                "label": {"type": "string", "description": "Short label for the session"},
-                                "max_loops": {"type": "integer", "description": "Max turns (optional, default 200)"},
-                                "estimated_turns": {"type": "integer", "description": "Your estimate of turns needed"},
-                            },
-                            "required": ["prompt"],
-                        },
-                    },
-                }]
+                messages = [
+                    {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT.format(
+                        max_workers=orchestrator._max_workers
+                    )},
+                    {"role": "user", "content": meta_prompt},
+                ]
+                max_turns = 50
 
                 try:
-                    async with httpx.AsyncClient(timeout=300) as client:
-                        resp = await client.post(
-                            OPENROUTER_URL,
-                            headers=_make_headers(orchestrator.api_key),
-                            json={
-                                "model": OPUS,
-                                "messages": [
-                                    {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT.format(
-                                        max_workers=orchestrator._max_workers
-                                    )},
-                                    {"role": "user", "content": meta_prompt},
-                                ],
-                                "tools": tools,
-                                "tool_choice": "auto",
-                                "temperature": 0.2,
-                                "max_tokens": 16384,
-                            },
-                        )
-                        data = resp.json()
+                    async with httpx.AsyncClient(timeout=600) as client:
+                        for turn in range(max_turns):
+                            self.notify(
+                                f"Smart orchestrator: turn {turn + 1}...",
+                                severity="information")
 
-                    launches = []
-                    for choice in data.get("choices", []):
-                        msg = choice.get("message", {})
-                        for tc in msg.get("tool_calls", []):
-                            if tc["function"]["name"] == "launch_agent":
+                            resp = await client.post(
+                                OPENROUTER_URL,
+                                headers=_make_headers(orchestrator.api_key),
+                                json={
+                                    "model": OPUS,
+                                    "messages": messages,
+                                    "tools": ORCHESTRATOR_TOOLS,
+                                    "tool_choice": "auto",
+                                    "temperature": 0.2,
+                                    "max_tokens": 16384,
+                                },
+                            )
+                            data = resp.json()
+
+                            if "error" in data:
+                                err = data["error"]
+                                self.notify(
+                                    f"Smart orchestrator API error: {err.get('message', err)}",
+                                    severity="error")
+                                break
+
+                            if not data.get("choices"):
+                                self.notify(
+                                    "Smart orchestrator: empty response from model.",
+                                    severity="error")
+                                break
+
+                            msg = data["choices"][0]["message"]
+                            messages.append(msg)
+
+                            tool_calls = msg.get("tool_calls", [])
+                            text = msg.get("content", "")
+
+                            # No tool calls → orchestrator is done
+                            if not tool_calls:
+                                if text:
+                                    self.notify(
+                                        f"Smart orchestrator done: {text[:200]}",
+                                        severity="information")
+                                else:
+                                    self.notify(
+                                        "Smart orchestrator complete.",
+                                        severity="information")
+                                break
+
+                            if text:
+                                self.notify(
+                                    f"Orchestrator: {text[:150]}",
+                                    severity="information")
+
+                            # Count launches for notification
+                            n_launches = sum(
+                                1 for tc in tool_calls
+                                if tc["function"]["name"] == "launch_agent")
+                            if n_launches:
+                                self.notify(
+                                    f"Launching {n_launches} agent"
+                                    f"{'s' if n_launches != 1 else ''}...",
+                                    severity="information")
+
+                            # Execute all tool calls in parallel
+                            async def _exec_tc(tc):
+                                name = tc["function"]["name"]
                                 try:
-                                    launch_args = json.loads(tc["function"]["arguments"])
-                                    launches.append(launch_args)
+                                    args = json.loads(tc["function"]["arguments"])
                                 except json.JSONDecodeError:
-                                    pass
+                                    return {
+                                        "role": "tool",
+                                        "tool_call_id": tc["id"],
+                                        "content": "Error: invalid JSON in arguments",
+                                    }
+                                if name == "launch_agent":
+                                    result = await self._launch_and_await_agent(
+                                        prompt=args.get("prompt", ""),
+                                        label=args.get("label"),
+                                        max_loops=args.get("max_loops"),
+                                    )
+                                else:
+                                    result = await self._exec_orchestrator_tool(
+                                        name, args)
+                                return {
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": result,
+                                }
 
-                    if not launches:
-                        self.app.call_from_thread(
-                            self.notify, "Smart launcher did not produce any agents.", severity="warning")
-                        return
+                            results = await asyncio.gather(
+                                *[_exec_tc(tc) for tc in tool_calls])
+                            messages.extend(results)
+                        else:
+                            self.notify(
+                                f"Smart orchestrator: hit {max_turns}-turn limit.",
+                                severity="warning")
 
-                    total_est_turns = sum(l.get("estimated_turns", 8) for l in launches)
-                    avg_cost = 0.03
-                    est_low = total_est_turns * avg_cost * 0.5
-                    est_high = total_est_turns * avg_cost * 1.5
-
-                    self.notify(
-                        f"Launching {len(launches)} agents (~{total_est_turns} turns, "
-                        f"est. ${est_low:.2f}-${est_high:.2f})",
-                        severity="information"
-                    )
-
-                    if len(launches) > orchestrator._max_workers:
-                        launches = launches[:orchestrator._max_workers]
-
-                    for la in launches:
-                        await self._do_launch(
-                            prompt=la["prompt"],
-                            label=la.get("label"),
-                            max_loops=la.get("max_loops"),
-                        )
                 except Exception as e:
-                    self.notify(f"Smart launcher error: {e}", severity="error")
+                    self.notify(f"Smart orchestrator error: {e}", severity="error")
 
         tui = OrchestratorTUI()
         tui.title = "dothething orchestrator"
