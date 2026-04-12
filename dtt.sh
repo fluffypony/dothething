@@ -6587,6 +6587,69 @@ async def _send_email_notification(to_email, subject, body):
         print(f"  ⚠ Email notification failed: {e}", file=sys.stderr)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# SingleAgentTUI — full-screen TUI for single-agent mode (--tui)
+# ═══════════════════════════════════════════════════════════════════
+class SingleAgentTUI:
+    """Textual-based TUI for single-agent mode. Opt-in via --tui."""
+    _app = None
+
+    @staticmethod
+    def create_app(agent):
+        from textual.app import App, ComposeResult
+        from textual.widgets import Header, Footer, RichLog, Input
+        from textual.containers import Vertical
+
+        class _SingleTUI(App):
+            CSS = """
+            RichLog { height: 1fr; }
+            Input { dock: bottom; }
+            """
+
+            def __init__(self, agent_ref, **kwargs):
+                super().__init__(**kwargs)
+                self._agent = agent_ref
+
+            def compose(self) -> ComposeResult:
+                yield Header(show_clock=True)
+                yield RichLog(id="log", wrap=True, highlight=True)
+                yield Input(id="input", placeholder="Type to inject input...")
+                yield Footer()
+
+            def on_mount(self):
+                a = self._agent
+                a.events.on("tool_start", lambda **d: self._safe_log(f"  ⚡ {d.get('name', '')}..."))
+                a.events.on("tool_end", lambda **d: self._safe_log(f"  ✓ {d.get('name', '')}"))
+                a.events.on("assistant_text", lambda **d: self._safe_log(d.get("text", "")))
+                a.events.on("cost", lambda **d: self._update_title(d))
+                a.events.on("finalized", lambda **d: self._safe_log("✅ Finalized"))
+                a.events.on("turn_start", lambda **d: self._safe_log(f"\n── Turn {d.get('turn', '?')} ──"))
+                self.run_worker(self._run_agent())
+
+            async def _run_agent(self):
+                await self._agent.run(self._agent._tui_prompt,
+                                       max_loops=self._agent._tui_max_loops,
+                                       resume_messages=self._agent._tui_resume_messages)
+
+            def _safe_log(self, text):
+                try:
+                    self.query_one("#log", RichLog).write(text)
+                except Exception:
+                    pass
+
+            def _update_title(self, data):
+                cost = data.get("total", 0)
+                self.title = f"dothething — ${cost:.4f}" if isinstance(cost, (int, float)) else "dothething"
+
+            def on_input_submitted(self, event):
+                if hasattr(self._agent, 'input_handler') and self._agent.input_handler:
+                    with self._agent.input_handler._lock:
+                        self._agent.input_handler._live_queue.append(event.value)
+                event.input.value = ""
+
+        return _SingleTUI(agent)
+
+
 class CostGuard:
     """Hard spending limit with checkpoint-and-exit."""
     def __init__(self, max_cost, events):
@@ -6684,10 +6747,21 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
 
     try:
         await agent.setup()
-        print(f"  ✓ Model: {model}", file=sys.stderr)
-        print(f"  ✓ Oracle: {oracle_model}", file=sys.stderr)
-        print(f"  ✓ Agent ready\n", file=sys.stderr)
-        await agent.run(prompt, max_loops=max_loops, resume_messages=resume_messages)
+        if not pipe_mode:
+            print(f"  ✓ Model: {model}", file=sys.stderr)
+            print(f"  ✓ Oracle: {oracle_model}", file=sys.stderr)
+            print(f"  ✓ Agent ready\n", file=sys.stderr)
+
+        # TUI mode: launch Textual full-screen UI
+        if tui_mode and not pipe_mode and not worker_mode and sys.stderr.isatty():
+            agent.spinner = Spinner(enabled=False)
+            agent._tui_prompt = prompt
+            agent._tui_max_loops = max_loops
+            agent._tui_resume_messages = resume_messages
+            tui_app = SingleAgentTUI.create_app(agent)
+            tui_app.run()
+        else:
+            await agent.run(prompt, max_loops=max_loops, resume_messages=resume_messages)
     except KeyboardInterrupt:
         print("\n\n  ⚡ Interrupted!", file=sys.stderr)
     except Exception as e:
