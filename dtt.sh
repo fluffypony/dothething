@@ -1480,6 +1480,253 @@ async def smart_summarize(raw, goal, headers, cost_tracker, http, tool_name="unk
             return trunc
 
 # ═══════════════════════════════════════════════════════════════════
+# Secret redaction
+# ═══════════════════════════════════════════════════════════════════
+def _redact_value(key, value):
+    sensitive_suffixes = ("KEY", "SECRET", "TOKEN", "PASSWORD", "API_KEY")
+    if any(key.upper().endswith(s) for s in sensitive_suffixes) or "KEY" in key.upper():
+        if len(value) > 8:
+            return value[:4] + "..." + value[-4:]
+        return "****"
+    return value
+
+# ═══════════════════════════════════════════════════════════════════
+# Clipboard — platform-native helpers
+# ═══════════════════════════════════════════════════════════════════
+def _clipboard_copy_text(text):
+    if sys.platform == "darwin":
+        subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    elif sys.platform == "win32":
+        subprocess.run(["clip.exe"], input=text.encode(), check=True)
+    else:
+        for cmd in [["wl-copy"], ["xclip", "-selection", "clipboard"]]:
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True)
+                return
+            except FileNotFoundError:
+                continue
+        raise RuntimeError("No clipboard tool found. Install wl-clipboard or xclip.")
+
+def _clipboard_paste_text():
+    if sys.platform == "darwin":
+        return subprocess.run(["pbpaste"], capture_output=True, text=True, check=True).stdout
+    elif sys.platform == "win32":
+        return subprocess.run(
+            ["powershell", "-command", "Get-Clipboard -Raw"],
+            capture_output=True, text=True, check=True
+        ).stdout
+    else:
+        for cmd in [["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"]]:
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+            except FileNotFoundError:
+                continue
+        raise RuntimeError("No clipboard tool found. Install wl-clipboard or xclip.")
+
+def _clipboard_copy_image(path):
+    p = str(Path(path).resolve())
+    if sys.platform == "darwin":
+        ext = Path(p).suffix.lower()
+        osascript_cls = "PNGf" if ext == ".png" else "JPEG"
+        script = f'set the clipboard to (read (POSIX file "{p}") as «class {osascript_cls}»)'
+        subprocess.run(["osascript", "-e", script], check=True)
+    elif sys.platform == "win32":
+        subprocess.run([
+            "powershell", "-command",
+            f"Add-Type -AssemblyName System.Windows.Forms; "
+            f"[System.Windows.Forms.Clipboard]::SetImage("
+            f"[System.Drawing.Image]::FromFile('{p}'))"
+        ], check=True)
+    else:
+        mime = mimetypes.guess_type(p)[0] or "image/png"
+        for cmd in [
+            ["wl-copy", "--type", mime],
+            ["xclip", "-selection", "clipboard", "-t", mime, "-i", p],
+        ]:
+            try:
+                if "wl-copy" in cmd[0]:
+                    with open(p, "rb") as f:
+                        subprocess.run(cmd, stdin=f, check=True)
+                else:
+                    subprocess.run(cmd, check=True)
+                return
+            except FileNotFoundError:
+                continue
+        raise RuntimeError("No clipboard tool found. Install wl-clipboard or xclip.")
+
+def _clipboard_paste_image(save_to):
+    try:
+        from PIL import ImageGrab
+        img = ImageGrab.grabclipboard()
+        if img is not None:
+            img.save(save_to)
+            return save_to
+    except Exception:
+        pass
+    if sys.platform == "darwin":
+        script = (
+            f'write (the clipboard as «class PNGf») to '
+            f'(open for access POSIX file "{save_to}" with write permission)'
+        )
+        try:
+            subprocess.run(["osascript", "-e", script], check=True)
+            if Path(save_to).exists() and Path(save_to).stat().st_size > 0:
+                return save_to
+        except Exception:
+            pass
+    elif sys.platform.startswith("linux"):
+        for cmd in [
+            f"wl-paste --type image/png > {shlex.quote(save_to)}",
+            f"xclip -selection clipboard -t image/png -o > {shlex.quote(save_to)}",
+        ]:
+            try:
+                subprocess.run(cmd, shell=True, check=True)
+                if Path(save_to).exists() and Path(save_to).stat().st_size > 0:
+                    return save_to
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+    return None
+
+# ═══════════════════════════════════════════════════════════════════
+# AgentMailManager — lazy-initialized AgentMail client
+# ═══════════════════════════════════════════════════════════════════
+class AgentMailManager:
+    def __init__(self):
+        self._client = None
+        self._default_inbox_id = None
+        self._pending_api_key = None
+
+    def _ensure_client(self):
+        api_key = os.environ.get("AGENTMAIL_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "AGENTMAIL_API_KEY not set. Use email_auth with action='start' "
+                "to create an account, or set it via manage_config."
+            )
+        if self._client is None or api_key != getattr(self._client, '_api_key', None):
+            from agentmail import AgentMail
+            self._client = AgentMail(api_key=api_key)
+            self._client._api_key = api_key
+        self._default_inbox_id = os.environ.get("AGENTMAIL_INBOX_ID")
+        return self._client
+
+    def _resolve_inbox(self, inbox_id=None):
+        return inbox_id or self._default_inbox_id or None
+
+# ═══════════════════════════════════════════════════════════════════
+# InputHandler — background keypress watcher for live/queued input
+# ═══════════════════════════════════════════════════════════════════
+class InputHandler:
+    def __init__(self, agent):
+        self.agent = agent
+        self.enabled = sys.stdin.isatty()
+        self._live_queue = []
+        self._queued_queue = []
+        self._lock = threading.Lock()
+        self._watching = False
+        self._old_settings = None
+        self._thread = None
+
+    def start(self):
+        if not self.enabled:
+            return
+        self._watching = True
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+
+    def _watch(self):
+        import termios, tty, select
+        fd = sys.stdin.fileno()
+        self._old_settings = termios.tcgetattr(fd)
+        try:
+            while self._watching:
+                tty.setcbreak(fd)
+                if select.select([sys.stdin], [], [], 0.15)[0]:
+                    ch = sys.stdin.read(1)
+                    if ch == '\x03':  # Ctrl-C
+                        self._watching = False
+                        break
+                    termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+                    self.agent.spinner.stop()
+                    self._prompt_user(prepend=ch if ch != '\x11' else '', queued=(ch == '\x11'))
+                    if self._watching:
+                        tty.setcbreak(fd)
+        except Exception:
+            pass
+        finally:
+            if self._old_settings:
+                try:
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_settings)
+                except Exception:
+                    pass
+
+    def _prompt_user(self, prepend='', queued=False):
+        label = "Queued" if queued else "Live"
+        sys.stderr.write(
+            f"\n\033[1;33m[ {label} Input ]\033[0m\n"
+            f"\033[90m  Enter = send now  |  Ctrl-Q = queue for next step  |  Esc = cancel\033[0m\n"
+        )
+        sys.stderr.flush()
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.key_binding import KeyBindings
+
+            kb = KeyBindings()
+            mode = [("queued" if queued else "live")]
+
+            @kb.add("c-q")
+            def _cq(event):
+                mode[0] = "queued"
+                event.app.exit(result=event.app.current_buffer.text)
+
+            @kb.add("escape")
+            def _esc(event):
+                mode[0] = "cancel"
+                event.app.exit(result="")
+
+            session = PromptSession("> ", key_bindings=kb)
+            text = session.prompt(default=prepend)
+
+            if mode[0] == "cancel" or not text.strip():
+                sys.stderr.write("\033[33m  Cancelled.\033[0m\n")
+                self.agent.spinner.start("Resuming...")
+                return
+
+            with self._lock:
+                if mode[0] == "queued":
+                    self._queued_queue.append(text.strip())
+                    sys.stderr.write(f"\033[32m  ✓ Input queued for next step.\033[0m\n")
+                else:
+                    self._live_queue.append(text.strip())
+                    sys.stderr.write(f"\033[32m  ✓ Input injected.\033[0m\n")
+
+            self.agent.spinner.start("Resuming...")
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\033[33m  Cancelled.\033[0m\n")
+            self.agent.spinner.start("Resuming...")
+
+    def drain_live(self):
+        with self._lock:
+            msgs = self._live_queue[:]
+            self._live_queue.clear()
+            return msgs
+
+    def drain_queued(self):
+        with self._lock:
+            msgs = self._queued_queue[:]
+            self._queued_queue.clear()
+            return msgs
+
+    def stop(self):
+        self._watching = False
+        if self._old_settings:
+            try:
+                import termios
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_settings)
+            except Exception:
+                pass
+
+# ═══════════════════════════════════════════════════════════════════
 # Tool Definitions — OpenAI function-calling schema
 # ═══════════════════════════════════════════════════════════════════
 RESULT_MODE_PROP = {
@@ -2268,6 +2515,239 @@ TOOLS = [
             },
         },
     },
+    # ── Self-config management ──
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_config",
+            "description": "Read, set, or delete keys in DTT config (~/.dtt/env). Use to manage API keys and settings. Values are redacted in output for security.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["get", "set", "delete", "list"]},
+                    "key": {"type": "string", "description": "Config key name (e.g. AGENTMAIL_API_KEY)"},
+                    "value": {"type": "string", "description": "Value to set (only for 'set')"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["action", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_skill",
+            "description": "Install, uninstall, or list DTT skills. Skills go to ~/.dtt/skills/<name>/SKILL.md. Install from raw content, URL, local path, or git repo. Changes take effect immediately.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["install", "uninstall", "list"]},
+                    "name": {"type": "string", "description": "Skill name (directory name)"},
+                    "content": {"type": "string", "description": "Raw SKILL.md content (for install)"},
+                    "source": {"type": "string", "description": "URL, local path, or git URL (for install)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["action", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_mcp",
+            "description": "Add, remove, or list MCP server configurations in ~/.dtt/mcp.json. Secrets in env params are automatically stored in ~/.dtt/env. Changes are hot-reloaded.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "remove", "list"]},
+                    "name": {"type": "string", "description": "Server name"},
+                    "command": {"type": "string", "description": "Executable command (for add)"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments"},
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables for the server"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["action", "result_mode"],
+            },
+        },
+    },
+    # ── User input ──
+    {
+        "type": "function",
+        "function": {
+            "name": "request_user_input",
+            "description": (
+                "Pause and ask the user a question. Use sparingly — only when information "
+                "cannot be obtained any other way (OTP codes, secrets, destructive action "
+                "confirmation, binary user preferences). Always phrase with a default action "
+                "so work continues if no response. The user may not be present."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Question to display. Include a default action, e.g. 'Should I X or Y? (I will go with X if no reply in 2 min)'"},
+                    "secret": {"type": "boolean", "description": "If true, mask user input (for passwords/OTPs)"},
+                    "timeout_seconds": {"type": "integer", "description": "Seconds to wait before proceeding (default 120)"},
+                    "placeholder": {"type": "string", "description": "Hint text for the input field"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["question", "result_mode"],
+            },
+        },
+    },
+    # ── Clipboard ──
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_copy",
+            "description": "Copy text or an image file to the system clipboard. Works on macOS, Linux (X11 and Wayland), and Windows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Text to copy"},
+                    "file_path": {"type": "string", "description": "Path to file to copy (images copied as image data, text files as text)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_paste",
+            "description": "Paste from the system clipboard. Returns text content, or saves image to file. For images, provide save_image_to.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "save_image_to": {"type": "string", "description": "If clipboard has image, save to this path"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
+    # ── Email (AgentMail) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "email_auth",
+            "description": "Set up or verify AgentMail account. action='status' checks config. action='start' begins signup (sends OTP to human_email). action='verify' completes it with the OTP code. After verification, credentials persist in ~/.dtt/env.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "start", "verify"]},
+                    "human_email": {"type": "string", "description": "User's real email for OTP (required for 'start')"},
+                    "username": {"type": "string", "description": "Desired inbox username (default: dtt-agent)"},
+                    "otp_code": {"type": "string", "description": "6-digit OTP code (required for 'verify')"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["action", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_list_inboxes",
+            "description": "List all AgentMail inboxes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"result_mode": RESULT_MODE_PROP},
+                "required": ["result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_create_inbox",
+            "description": "Create a new AgentMail inbox. Sets as default if none configured.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "description": "Desired username (creates username@agentmail.to)"},
+                    "display_name": {"type": "string", "description": "Display name for the inbox"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_list",
+            "description": "List emails in an inbox. Returns subject, sender, date, snippet. Uses thread-oriented listing when available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": {"type": "string", "description": "Inbox ID (uses default if omitted)"},
+                    "limit": {"type": "integer", "description": "Max messages (default 20)"},
+                    "labels": {"type": "string", "description": "Filter label (e.g. 'received', 'unread', 'sent')"},
+                    "include_spam": {"type": "boolean", "description": "Include spam (default false)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_read",
+            "description": "Read a specific email by message_id or thread_id. Returns full body, headers, attachments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "Message ID to read"},
+                    "thread_id": {"type": "string", "description": "Thread ID for conversation view"},
+                    "inbox_id": {"type": "string", "description": "Inbox ID (uses default if omitted)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_send",
+            "description": "Send an email or reply to a thread. Use reply_to_message_id for threading. Send both text and html body for better deliverability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email (or comma-separated list)"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string", "description": "Plain text body"},
+                    "html": {"type": "string", "description": "Optional HTML body"},
+                    "cc": {"type": "string", "description": "CC recipients"},
+                    "bcc": {"type": "string", "description": "BCC recipients"},
+                    "reply_to_message_id": {"type": "string", "description": "Message ID to reply to (enables threading)"},
+                    "inbox_id": {"type": "string", "description": "Inbox ID (uses default if omitted)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["to", "subject", "body", "result_mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_delete",
+            "description": "Delete an email thread. Note: AgentMail deletion is thread-scoped. Moves to trash by default.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "Thread ID to delete"},
+                    "message_id": {"type": "string", "description": "Message ID (will look up thread_id automatically)"},
+                    "inbox_id": {"type": "string", "description": "Inbox ID (uses default if omitted)"},
+                    "permanent": {"type": "boolean", "description": "Permanently delete instead of trash (default false)"},
+                    "result_mode": RESULT_MODE_PROP,
+                },
+                "required": ["result_mode"],
+            },
+        },
+    },
 ]
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2780,6 +3260,23 @@ class Agent:
         "use_skill":       "_tool_use_skill",
         "batch_process":   "_tool_batch_process",
         "browser_agent":   "_tool_browser_agent",
+        # Self-config management
+        "manage_config":   "_tool_manage_config",
+        "manage_skill":    "_tool_manage_skill",
+        "manage_mcp":      "_tool_manage_mcp",
+        # User input
+        "request_user_input": "_tool_request_user_input",
+        # Clipboard
+        "clipboard_copy":  "_tool_clipboard_copy",
+        "clipboard_paste": "_tool_clipboard_paste",
+        # Email (AgentMail)
+        "email_auth":          "_tool_email_auth",
+        "email_list_inboxes":  "_tool_email_list_inboxes",
+        "email_create_inbox":  "_tool_email_create_inbox",
+        "email_list":          "_tool_email_list",
+        "email_read":          "_tool_email_read",
+        "email_send":          "_tool_email_send",
+        "email_delete":        "_tool_email_delete",
     }
 
     def __init__(self, model, oracle_model, api_key, cwd, debug=False, verbose=False, headed=False):
@@ -2814,6 +3311,9 @@ class Agent:
         # New managers
         self.skill_manager = SkillManager()
         self.mcp_manager = MCPManager()
+        self.email_manager = AgentMailManager()
+        self.events = EventBus()
+        self.input_handler = InputHandler(self)
         # For serial-work detection and pre-finalize validation
         self._tool_call_patterns = []
         self._browser_agent_used = False
@@ -2854,9 +3354,14 @@ class Agent:
             for name in loaded_skills:
                 print(f"    - {name}", file=sys.stderr)
 
+        # Start background input handler
+        self.input_handler.start()
+
     # ── Tool implementations ─────────────────────────────────────
     async def _tool_read_file(self, path, start_line=None, end_line=None, **kw):
         p = resolve_path(self.cwd, path)
+        if p == Path.home() / ".dtt" / "env":
+            return "Error: Direct file access to ~/.dtt/env is blocked for security. Use the manage_config tool instead."
         if not p.exists():
             return f"Error: File not found: {path}"
         if p.is_dir():
@@ -2936,6 +3441,8 @@ class Agent:
 
     async def _tool_write_file(self, path, content, mode=None, **kw):
         p = resolve_path(self.cwd, path)
+        if p == Path.home() / ".dtt" / "env":
+            return "Error: Direct file access to ~/.dtt/env is blocked for security. Use the manage_config tool instead."
         mode = mode or "overwrite"
         lock = await self._get_file_lock(str(p))
         async with lock:
@@ -2986,6 +3493,8 @@ class Agent:
                               start_line=None, end_line=None, new_content=None,
                               after_line=None, insert_content=None, **kw):
         p = resolve_path(self.cwd, path)
+        if p == Path.home() / ".dtt" / "env":
+            return "Error: Direct file access to ~/.dtt/env is blocked for security. Use the manage_config tool instead."
         if not p.exists():
             return f"Error: File not found: {path}"
         lock = await self._get_file_lock(str(p))
@@ -4056,6 +4565,515 @@ class Agent:
                 traceback.print_exc()
             return f"Browser agent error: {e}"
 
+    # ── Self-config management tools ─────────────────────────────
+    async def _tool_manage_config(self, action, key=None, value=None, **kw):
+        env_file = Path.home() / ".dtt" / "env"
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = env_file.read_text().splitlines() if env_file.exists() else []
+        env = {}
+        comment_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                comment_lines.append(line)
+                continue
+            m = re.match(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)', stripped)
+            if m:
+                val = m.group(2).strip("'\"")
+                # Handle shell-quoted values from shlex.quote
+                if m.group(2).startswith("'") and m.group(2).endswith("'"):
+                    val = m.group(2)[1:-1]
+                env[m.group(1)] = val
+
+        if action == "list":
+            if not env:
+                return "(no config keys set)"
+            return "\n".join(f"{k}={_redact_value(k, v)}" for k, v in env.items())
+
+        if action == "get":
+            if not key:
+                return "Error: key is required for get"
+            v = env.get(key)
+            if v is None:
+                return f"Key '{key}' not found"
+            return f"{key}={_redact_value(key, v)}"
+
+        if action == "set":
+            if not key or value is None:
+                return "Error: key and value are required for set"
+            env[key] = value
+            os.environ[key] = value
+            if key == "OPENROUTER_API_KEY":
+                self.api_key = value
+                self.headers = _make_headers(value)
+
+        if action == "delete":
+            if not key:
+                return "Error: key is required for delete"
+            if key not in env:
+                return f"Key '{key}' not found"
+            del env[key]
+            os.environ.pop(key, None)
+
+        new_content = "\n".join(comment_lines) + "\n" if comment_lines else ""
+        new_content += "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items()) + "\n"
+
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(env_file.parent))
+        try:
+            os.write(tmp_fd, new_content.encode())
+            os.close(tmp_fd)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, str(env_file))
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+
+        return f"Config updated: {action} {key or ''}"
+
+    async def _tool_manage_skill(self, action, name=None, content=None, source=None, **kw):
+        skills_dir = Path.home() / ".dtt" / "skills"
+
+        if action == "list":
+            if not skills_dir.exists():
+                return "(no skills installed)"
+            entries = [d.name for d in skills_dir.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+            return json.dumps(entries) if entries else "(no skills installed)"
+
+        if action == "install":
+            if not name:
+                return "Error: name is required for install"
+            skill_dir = skills_dir / name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            target = skill_dir / "SKILL.md"
+
+            if content:
+                target.write_text(content)
+            elif source:
+                src_path = Path(source).expanduser()
+                if src_path.exists():
+                    shutil.copy2(str(src_path), str(target))
+                elif source.startswith("http"):
+                    resp = await self.http.get(source, timeout=30)
+                    resp.raise_for_status()
+                    target.write_text(resp.text)
+                elif source.endswith(".git") or "github.com" in source:
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "clone", source, str(skill_dir),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.wait()
+                    if proc.returncode != 0:
+                        return f"Error: git clone failed for {source}"
+                else:
+                    return f"Error: source not found: {source}"
+            else:
+                return "Error: content or source is required for install"
+
+            self.skill_manager._load_skills()
+            self._rebuild_system_prompt()
+            return f"Skill '{name}' installed and loaded. Available now."
+
+        if action == "uninstall":
+            if not name:
+                return "Error: name is required for uninstall"
+            skill_dir = skills_dir / name
+            if not skill_dir.exists():
+                return f"Skill '{name}' not found"
+            shutil.rmtree(str(skill_dir))
+            self.skill_manager.skills.pop(name, None)
+            self._rebuild_system_prompt()
+            return f"Skill '{name}' uninstalled."
+
+        return f"Error: unknown action '{action}'"
+
+    async def _tool_manage_mcp(self, action, name=None, command=None, args=None, env=None, **kw):
+        mcp_file = Path.home() / ".dtt" / "mcp.json"
+        mcp_file.parent.mkdir(parents=True, exist_ok=True)
+        config = json.loads(mcp_file.read_text()) if mcp_file.exists() else {"mcpServers": {}}
+        servers = config.setdefault("mcpServers", {})
+
+        if action == "list":
+            if not servers:
+                return "(no MCP servers configured)"
+            return json.dumps({k: {"command": v.get("command", ""), "args": v.get("args", [])}
+                              for k, v in servers.items()}, indent=2)
+
+        if action == "add":
+            if not name or not command:
+                return "Error: name and command required for add"
+            entry = {"command": command}
+            if args:
+                entry["args"] = args if isinstance(args, list) else [args]
+            if env:
+                env_clean = {}
+                for ek, ev in env.items():
+                    if any(s in ek.upper() for s in ("KEY", "SECRET", "TOKEN", "PASSWORD")):
+                        env_var_name = f"MCP_{name.upper()}_{ek.upper()}"
+                        await self._tool_manage_config(action="set", key=env_var_name, value=ev)
+                        env_clean[ek] = f"${{{env_var_name}}}"
+                    else:
+                        env_clean[ek] = ev
+                entry["env"] = env_clean
+            servers[name] = entry
+            mcp_file.write_text(json.dumps(config, indent=2))
+
+            try:
+                await self.mcp_manager.stop()
+                self.mcp_manager.servers.clear()
+                await self.mcp_manager.start()
+                self._rebuild_system_prompt()
+                return f"MCP server '{name}' added and connected."
+            except Exception as e:
+                return f"MCP server '{name}' added to config. Connection error: {e}. Will be available on next restart."
+
+        if action == "remove":
+            if not name:
+                return "Error: name required for remove"
+            if name not in servers:
+                return f"MCP server '{name}' not found"
+            del servers[name]
+            mcp_file.write_text(json.dumps(config, indent=2))
+            await self.mcp_manager.stop()
+            self.mcp_manager.servers.clear()
+            await self.mcp_manager.start()
+            self._rebuild_system_prompt()
+            return f"MCP server '{name}' removed."
+
+        return f"Error: unknown action '{action}'"
+
+    # ── User input tool ───────────────────────────────────────────
+    async def _tool_request_user_input(self, question, secret=False, timeout_seconds=120, placeholder=None, **kw):
+        self.spinner.stop()
+        self.events.emit("status", phase="waiting_for_user", detail=question)
+
+        print(f"\n\033[1;33m[Agent is asking]\033[0m {question}", file=sys.stderr)
+        if placeholder:
+            print(f"\033[90m  (hint: {placeholder})\033[0m", file=sys.stderr)
+
+        if not sys.stdin.isatty():
+            return f"(non-interactive session — no response after {timeout_seconds}s — proceeding with best judgment)"
+
+        # Temporarily restore terminal if InputHandler changed it
+        self.input_handler.stop()
+        try:
+            from prompt_toolkit import PromptSession
+            session = PromptSession()
+            response = await asyncio.wait_for(
+                session.prompt_async(
+                    "  > ",
+                    is_password=secret,
+                ),
+                timeout=timeout_seconds
+            )
+            if secret:
+                self.events.emit("tool_end", name="request_user_input", result_len=len("(secret)"))
+            return response.strip() if response else "(no response — proceeding with best judgment)"
+        except asyncio.TimeoutError:
+            return f"(no response after {timeout_seconds}s — proceeding with best judgment)"
+        except (EOFError, KeyboardInterrupt):
+            return "(user cancelled input — proceeding with best judgment)"
+        finally:
+            self.input_handler.start()
+            self.spinner.start("Resuming...")
+
+    # ── Clipboard tools ───────────────────────────────────────────
+    async def _tool_clipboard_copy(self, content=None, file_path=None, **kw):
+        try:
+            if file_path:
+                p = resolve_path(self.cwd, file_path)
+                if not p.exists():
+                    return f"Error: file not found: {file_path}"
+                ext = p.suffix.lower()
+                if ext in IMAGE_EXTENSIONS:
+                    _clipboard_copy_image(str(p))
+                    return f"Image copied to clipboard from {file_path}"
+                else:
+                    text = p.read_text(errors="replace")
+                    _clipboard_copy_text(text)
+                    return f"Copied {len(text)} chars from {file_path} to clipboard."
+            elif content:
+                _clipboard_copy_text(content)
+                return f"Copied {len(content)} chars to clipboard."
+            return "Error: provide content or file_path"
+        except Exception as e:
+            return f"Clipboard copy error: {e}"
+
+    async def _tool_clipboard_paste(self, save_image_to=None, **kw):
+        try:
+            if save_image_to:
+                p = resolve_path(self.cwd, save_image_to)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                result = _clipboard_paste_image(str(p))
+                if result:
+                    size = Path(result).stat().st_size
+                    return f"Image saved from clipboard to {save_image_to} ({size} bytes)"
+                return "No image data in clipboard."
+
+            text = _clipboard_paste_text()
+            if text:
+                return text
+
+            default_path = str(self.thread_dir / "clipboard_paste.png") if hasattr(self, 'thread_dir') else "/tmp/clipboard_paste.png"
+            result = _clipboard_paste_image(default_path)
+            if result:
+                return f"Clipboard contained an image. Saved to {default_path}"
+
+            return "(clipboard is empty)"
+        except Exception as e:
+            return f"Clipboard paste error: {e}"
+
+    # ── Email (AgentMail) tools ───────────────────────────────────
+    async def _tool_email_auth(self, action, human_email=None, username=None, otp_code=None, **kw):
+        from agentmail import AgentMail
+
+        if action == "status":
+            key = os.environ.get("AGENTMAIL_API_KEY")
+            inbox = os.environ.get("AGENTMAIL_INBOX_ID")
+            if key and inbox:
+                return json.dumps({"configured": True, "inbox_id": inbox, "api_key_set": True})
+            elif key:
+                return json.dumps({"configured": True, "api_key_set": True, "inbox_id": None})
+            return json.dumps({"configured": False, "message": "No AGENTMAIL_API_KEY set. Use action='start' to sign up, or save a key from https://console.agentmail.to via manage_config."})
+
+        if action == "start":
+            if not human_email:
+                return "Error: human_email is required for signup"
+            try:
+                client = AgentMail()
+                if not hasattr(client, 'agent') or not hasattr(client.agent, 'sign_up'):
+                    return ("Error: This version of the agentmail SDK does not support programmatic signup. "
+                            "Please ask the user to create an API key at https://console.agentmail.to, "
+                            "then save it with manage_config(action='set', key='AGENTMAIL_API_KEY', value='...').")
+
+                response = client.agent.sign_up(
+                    human_email=human_email,
+                    username=username or "dtt-agent",
+                )
+                if hasattr(response, 'api_key') and response.api_key:
+                    self.email_manager._pending_api_key = response.api_key
+                if hasattr(response, 'inbox_id') and response.inbox_id:
+                    self.email_manager._default_inbox_id = response.inbox_id
+
+                return json.dumps({
+                    "status": "otp_sent",
+                    "message": f"OTP sent to {human_email}. Use request_user_input to ask the user for the 6-digit code, then call email_auth with action='verify' and the otp_code.",
+                })
+            except Exception as e:
+                return f"Email signup error: {e}"
+
+        if action == "verify":
+            if not otp_code:
+                return "Error: otp_code is required for verify"
+            try:
+                api_key = self.email_manager._pending_api_key or os.environ.get("AGENTMAIL_API_KEY")
+                client = AgentMail(api_key=api_key) if api_key else AgentMail()
+
+                if not hasattr(client, 'agent') or not hasattr(client.agent, 'verify'):
+                    return "Error: This SDK version does not support programmatic verification."
+
+                response = client.agent.verify(otp_code=otp_code)
+
+                final_key = getattr(response, 'api_key', None) or api_key
+                inbox_id = getattr(response, 'inbox_id', None) or self.email_manager._default_inbox_id
+
+                if final_key:
+                    await self._tool_manage_config(action="set", key="AGENTMAIL_API_KEY", value=final_key)
+                if inbox_id:
+                    await self._tool_manage_config(action="set", key="AGENTMAIL_INBOX_ID", value=inbox_id)
+
+                self.email_manager._pending_api_key = None
+                self.email_manager._client = None
+
+                return json.dumps({
+                    "status": "verified",
+                    "inbox_id": inbox_id,
+                    "message": "AgentMail configured. API key and inbox ID saved to ~/.dtt/env."
+                })
+            except Exception as e:
+                return f"Email verification error: {e}"
+
+        return f"Error: unknown action '{action}'. Use 'status', 'start', or 'verify'."
+
+    async def _tool_email_list_inboxes(self, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            inboxes = client.inboxes.list()
+            return json.dumps([{
+                "id": getattr(i, 'id', str(i)),
+                "email": getattr(i, 'email', ''),
+                "display_name": getattr(i, 'display_name', ''),
+            } for i in inboxes], indent=2, default=str)
+        except Exception as e:
+            return f"Error listing inboxes: {e}"
+
+    async def _tool_email_create_inbox(self, username=None, display_name=None, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            kwargs = {}
+            if username:
+                kwargs["username"] = username
+            if display_name:
+                kwargs["display_name"] = display_name
+            inbox = client.inboxes.create(**kwargs)
+            inbox_id = getattr(inbox, 'id', str(inbox))
+            email = getattr(inbox, 'email', '')
+
+            if not os.environ.get("AGENTMAIL_INBOX_ID"):
+                await self._tool_manage_config(action="set", key="AGENTMAIL_INBOX_ID", value=inbox_id)
+
+            return json.dumps({"id": inbox_id, "email": email}, default=str)
+        except Exception as e:
+            return f"Error creating inbox: {e}"
+
+    async def _tool_email_list(self, inbox_id=None, limit=20, labels=None, include_spam=False, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            inbox = self.email_manager._resolve_inbox(inbox_id)
+            if not inbox:
+                return "Error: no inbox_id configured. Run email_auth or provide inbox_id."
+
+            kwargs = {"inbox_id": inbox}
+            if limit:
+                kwargs["limit"] = int(limit)
+
+            try:
+                threads = client.inboxes.threads.list(**kwargs)
+                results = []
+                for t in threads:
+                    results.append({
+                        "thread_id": getattr(t, 'id', str(t)),
+                        "subject": getattr(t, 'subject', ''),
+                        "from": getattr(t, 'from_', getattr(t, 'sender', '')),
+                        "date": str(getattr(t, 'created_at', getattr(t, 'date', ''))),
+                        "snippet": (getattr(t, 'snippet', getattr(t, 'text', '')) or '')[:200],
+                        "labels": getattr(t, 'labels', []),
+                        "unread": getattr(t, 'unread', None),
+                    })
+                return json.dumps(results[:int(limit)], indent=2, ensure_ascii=False, default=str)
+            except (AttributeError, TypeError):
+                messages = client.inboxes.messages.list(**kwargs)
+                results = []
+                for m in messages:
+                    results.append({
+                        "message_id": getattr(m, 'id', getattr(m, 'message_id', str(m))),
+                        "from": getattr(m, 'from_', getattr(m, 'sender', '')),
+                        "subject": getattr(m, 'subject', ''),
+                        "date": str(getattr(m, 'created_at', getattr(m, 'date', ''))),
+                        "snippet": (getattr(m, 'text', '') or '')[:200],
+                    })
+                return json.dumps(results[:int(limit)], indent=2, ensure_ascii=False, default=str)
+        except Exception as e:
+            return f"Error listing emails: {e}"
+
+    async def _tool_email_read(self, message_id=None, thread_id=None, inbox_id=None, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            inbox = self.email_manager._resolve_inbox(inbox_id)
+            if not inbox:
+                return "Error: no inbox_id configured."
+
+            if thread_id:
+                thread = client.inboxes.threads.get(inbox_id=inbox, thread_id=thread_id)
+                return json.dumps({
+                    "thread_id": thread_id,
+                    "subject": getattr(thread, 'subject', ''),
+                    "messages": [{
+                        "id": getattr(m, 'id', ''),
+                        "from": getattr(m, 'from_', ''),
+                        "date": str(getattr(m, 'created_at', '')),
+                        "text": getattr(m, 'extracted_text', getattr(m, 'text', '')),
+                        "html": getattr(m, 'extracted_html', getattr(m, 'html', '')),
+                    } for m in getattr(thread, 'messages', [])],
+                    "attachments": [str(a) for a in getattr(thread, 'attachments', [])],
+                }, indent=2, ensure_ascii=False, default=str)
+            else:
+                msg = client.inboxes.messages.get(inbox_id=inbox, message_id=message_id)
+                return json.dumps({
+                    "id": getattr(msg, 'id', message_id),
+                    "from": getattr(msg, 'from_', getattr(msg, 'sender', '')),
+                    "to": getattr(msg, 'to', ''),
+                    "subject": getattr(msg, 'subject', ''),
+                    "date": str(getattr(msg, 'created_at', '')),
+                    "text": getattr(msg, 'extracted_text', getattr(msg, 'text', '')),
+                    "html": getattr(msg, 'extracted_html', getattr(msg, 'html', '')),
+                    "thread_id": getattr(msg, 'thread_id', None),
+                    "attachments": [{
+                        "filename": getattr(a, 'filename', ''),
+                        "content_type": getattr(a, 'content_type', ''),
+                        "size": getattr(a, 'size', 0),
+                    } for a in getattr(msg, 'attachments', [])],
+                }, indent=2, ensure_ascii=False, default=str)
+        except Exception as e:
+            return f"Email read error: {e}"
+
+    async def _tool_email_send(self, to, subject, body, inbox_id=None, html=None,
+                                cc=None, bcc=None, reply_to_message_id=None, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            inbox = self.email_manager._resolve_inbox(inbox_id)
+            if not inbox:
+                return "Error: no inbox_id configured."
+
+            to_list = [to] if isinstance(to, str) else to
+
+            if reply_to_message_id:
+                kwargs = {
+                    "inbox_id": inbox,
+                    "message_id": reply_to_message_id,
+                    "text": body,
+                }
+                if html:
+                    kwargs["html"] = html
+                try:
+                    result = client.inboxes.messages.reply(reply_all=True, **kwargs)
+                except (AttributeError, TypeError):
+                    result = client.inboxes.messages.reply(**kwargs)
+            else:
+                kwargs = {
+                    "inbox_id": inbox,
+                    "to": to_list,
+                    "subject": subject,
+                    "text": body,
+                }
+                if html:
+                    kwargs["html"] = html
+                if cc:
+                    kwargs["cc"] = [cc] if isinstance(cc, str) else cc
+                if bcc:
+                    kwargs["bcc"] = [bcc] if isinstance(bcc, str) else bcc
+                result = client.inboxes.messages.send(**kwargs)
+
+            return json.dumps({
+                "status": "sent",
+                "message_id": getattr(result, 'id', getattr(result, 'message_id', str(result))),
+            }, default=str)
+        except Exception as e:
+            return f"Email send error: {e}"
+
+    async def _tool_email_delete(self, thread_id=None, message_id=None, inbox_id=None,
+                                  permanent=False, **kw):
+        try:
+            client = self.email_manager._ensure_client()
+            inbox = self.email_manager._resolve_inbox(inbox_id)
+            if not inbox:
+                return "Error: no inbox_id configured."
+
+            if message_id and not thread_id:
+                msg = client.inboxes.messages.get(inbox_id=inbox, message_id=message_id)
+                thread_id = getattr(msg, 'thread_id', None)
+                if not thread_id:
+                    return "Error: could not determine thread_id from message. Provide thread_id directly."
+
+            if not thread_id:
+                return "Error: thread_id is required (AgentMail deletion is thread-scoped)."
+
+            client.inboxes.threads.delete(inbox_id=inbox, thread_id=thread_id)
+            action_desc = "permanently deleted" if permanent else "moved to trash"
+            return f"Thread {thread_id} {action_desc}."
+        except Exception as e:
+            return f"Email delete error: {e}"
+
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
         """Compact conversation history when context grows too large."""
@@ -4268,7 +5286,23 @@ class Agent:
 
         nudge_count = 0
         for loop in range(max_loops):
+            # Drain live input (immediate — from any-key press)
+            for text in self.input_handler.drain_live():
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[User input added mid-run] {text}"
+                })
+                nudge_count = 0
+            # Drain queued input (from Ctrl-Q — delivered between steps)
+            for text in self.input_handler.drain_queued():
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[Queued user input] {text}"
+                })
+                nudge_count = 0
+
             await self._maybe_compact_context()
+            self.events.emit("turn_start", turn=loop)
             self.spinner.start(f"Thinking (turn {loop + 1})…")
             result = await self._call_model()
             self.spinner.stop()
@@ -4370,6 +5404,14 @@ class Agent:
 
             for r in results:
                 self.messages.append(r)
+
+            # Drain queued input after tool execution
+            for text in self.input_handler.drain_queued():
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[Queued user input] {text}"
+                })
+                nudge_count = 0
 
             # Error recovery nudge: if all tools failed
             # Broad detection: any result starting with "Error" or containing " error:" early
@@ -4513,9 +5555,76 @@ class Agent:
             return
         content[-1] = self._build_temporal_block()
 
+    def _rebuild_system_prompt(self):
+        """Rebuild the static system prompt with current skills/MCP/context."""
+        if not self.messages:
+            return
+        sysmsg = self.messages[0]
+        if sysmsg.get("role") != "system":
+            return
+        content = sysmsg.get("content")
+        if not isinstance(content, list) or len(content) < 2:
+            return
+
+        # Re-scan skills
+        self.skill_manager._load_skills()
+
+        # Rebuild inline skills text
+        inline_skills = []
+        callable_skills = []
+        for name, s in self.skill_manager.skills.items():
+            fm = s.get("frontmatter", {})
+            if fm.get("disable-model-invocation", False):
+                continue
+            if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
+                inline_skills.append((name, s))
+            else:
+                callable_skills.append((name, s.get("description", "")))
+
+        # Build skills section
+        skills_section = ""
+        if inline_skills:
+            skills_section += "\n<inline_skills>\n"
+            for name, s in inline_skills:
+                skills_section += f"\n## Skill: {name}\n{s['content']}\n"
+            skills_section += "</inline_skills>\n"
+        if callable_skills:
+            skills_section += "\n<available_skills>\nCall use_skill to invoke:\n"
+            for name, desc in callable_skills:
+                skills_section += f"- {name}: {desc}\n"
+            skills_section += "</available_skills>\n"
+
+        # Build MCP section
+        mcp_section = ""
+        if self.mcp_manager.servers:
+            mcp_section = "\n<mcp_tools>\nAdditional tools from MCP servers:\n"
+            for srv_name, srv in self.mcp_manager.servers.items():
+                for t in srv.get("tools_raw", []):
+                    tool_name = f"mcp__{srv_name}__{t.name}" if hasattr(t, 'name') else str(t)
+                    desc = getattr(t, 'description', '') if hasattr(t, 'description') else ''
+                    mcp_section += f"- {tool_name}: {desc}\n"
+            mcp_section += "</mcp_tools>\n"
+
+        # Reassemble the static block text
+        static_block = content[0]
+        if isinstance(static_block, dict) and "text" in static_block:
+            base_text = static_block["text"]
+            # Strip old skills/MCP sections if present
+            for tag in ["<inline_skills>", "<available_skills>", "<mcp_tools>"]:
+                end_tag = tag.replace("<", "</")
+                while tag in base_text:
+                    start = base_text.find(tag)
+                    end = base_text.find(end_tag)
+                    if end == -1:
+                        break
+                    base_text = base_text[:start] + base_text[end + len(end_tag):]
+            base_text = base_text.rstrip() + "\n" + skills_section + mcp_section
+            static_block["text"] = base_text
+
     # ── Model call with retry ────────────────────────────────────
     async def _call_model(self, retries=3):
         self._refresh_temporal_block()
+        self.events.emit("model_start", model=self.model)
         for attempt in range(retries):
             try:
                 payload = {
@@ -4772,6 +5881,7 @@ class Agent:
 
     # ── Cleanup ──────────────────────────────────────────────────
     async def cleanup(self):
+        self.input_handler.stop()
         self.spinner.stop()
         print("\n  ⏳ Cleaning up…", file=sys.stderr)
         self.searxng.stop()
