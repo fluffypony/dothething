@@ -5875,6 +5875,7 @@ class Agent:
                 brief = (s[:69] + "…") if len(s) > 70 else s
                 break
             self.spinner.update(f"⚡ {name}" + (f" → {brief}" if brief else ""))
+            self.events.emit("tool_start", name=name, args=brief)
 
             # MCP tool routing
             if name.startswith("mcp__"):
@@ -5921,6 +5922,7 @@ class Agent:
 
             tag = "raw" if (not result_mode or result_mode.lower() == "raw") else "sum"
             tok = count_tokens(final) if isinstance(final, str) else 0
+            self.events.emit("tool_end", name=name, result_len=tok)
             print(
                 f"  ⚡ {name}" + (f" → {brief}" if brief else "") + f"  [{tok:,} tok {tag}]",
                 file=sys.stderr,
