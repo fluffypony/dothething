@@ -153,10 +153,16 @@ done
 DTT_ENV_FILE="$HOME/.dtt/env"
 if [ -f "$DTT_ENV_FILE" ]; then
     # Remember current shell values (shell-exported vars always win)
+    # Track whether each var is set at all (even if empty)
+    _dtt_was_set_OR="${OPENROUTER_API_KEY+set}"
     _dtt_saved_OR="${OPENROUTER_API_KEY:-}"
+    _dtt_was_set_TC="${TWOCAPTCHA_API_KEY+set}"
     _dtt_saved_TC="${TWOCAPTCHA_API_KEY:-}"
+    _dtt_was_set_AM="${AGENTMAIL_API_KEY+set}"
     _dtt_saved_AM="${AGENTMAIL_API_KEY:-}"
+    _dtt_was_set_AI="${AGENTMAIL_INBOX_ID+set}"
     _dtt_saved_AI="${AGENTMAIL_INBOX_ID:-}"
+    _dtt_was_set_AH="${AGENTMAIL_HUMAN_EMAIL+set}"
     _dtt_saved_AH="${AGENTMAIL_HUMAN_EMAIL:-}"
 
     # Source file (it uses export KEY=value lines)
@@ -166,12 +172,13 @@ if [ -f "$DTT_ENV_FILE" ]; then
     set +a
 
     # Restore shell-exported values (they take precedence)
-    [ -n "$_dtt_saved_OR" ] && export OPENROUTER_API_KEY="$_dtt_saved_OR"
-    [ -n "$_dtt_saved_TC" ] && export TWOCAPTCHA_API_KEY="$_dtt_saved_TC"
-    [ -n "$_dtt_saved_AM" ] && export AGENTMAIL_API_KEY="$_dtt_saved_AM"
-    [ -n "$_dtt_saved_AI" ] && export AGENTMAIL_INBOX_ID="$_dtt_saved_AI"
-    [ -n "$_dtt_saved_AH" ] && export AGENTMAIL_HUMAN_EMAIL="$_dtt_saved_AH"
+    [ "$_dtt_was_set_OR" = "set" ] && export OPENROUTER_API_KEY="$_dtt_saved_OR"
+    [ "$_dtt_was_set_TC" = "set" ] && export TWOCAPTCHA_API_KEY="$_dtt_saved_TC"
+    [ "$_dtt_was_set_AM" = "set" ] && export AGENTMAIL_API_KEY="$_dtt_saved_AM"
+    [ "$_dtt_was_set_AI" = "set" ] && export AGENTMAIL_INBOX_ID="$_dtt_saved_AI"
+    [ "$_dtt_was_set_AH" = "set" ] && export AGENTMAIL_HUMAN_EMAIL="$_dtt_saved_AH"
     unset _dtt_saved_OR _dtt_saved_TC _dtt_saved_AM _dtt_saved_AI _dtt_saved_AH
+    unset _dtt_was_set_OR _dtt_was_set_TC _dtt_was_set_AM _dtt_was_set_AI _dtt_was_set_AH
 fi
 
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
