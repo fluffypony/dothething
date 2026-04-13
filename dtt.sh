@@ -419,42 +419,77 @@ class Spinner:
         self._console = None
         self._start_time = None
         self._msg = ""
+        self._lock = threading.Lock()
+        self._refresh_thread = None
+        self._refresh_stop = None
+
+    def _render_locked(self):
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        if self._status:
+            self._status.update(f"[bold cyan]{self._msg}[/] [dim]({elapsed:.1f}s)[/]")
+        elif self.enabled:
+            sys.stderr.write(f"\r\033[K⠋ {self._msg} ({elapsed:.1f}s)")
+            sys.stderr.flush()
+
+    def _refresh_loop(self, stop_event):
+        while not stop_event.wait(0.1):
+            with self._lock:
+                if not self.enabled or not self._start_time:
+                    continue
+                self._render_locked()
 
     def start(self, msg="Thinking..."):
         if not self.enabled:
             return
         self.stop()
-        self._msg = msg
-        self._start_time = time.time()
-        try:
-            from rich.console import Console
-            self._console = Console(stderr=True)
-            self._status = self._console.status(
-                f"[bold cyan]{msg}[/]",
-                spinner="dots",
-                spinner_style="cyan",
+        with self._lock:
+            self._msg = msg
+            self._start_time = time.time()
+            try:
+                from rich.console import Console
+                self._console = Console(stderr=True)
+                self._status = self._console.status(
+                    f"[bold cyan]{msg}[/]",
+                    spinner="dots",
+                    spinner_style="cyan",
+                )
+                self._status.start()
+            except ImportError:
+                self._status = None
+                self._console = None
+            self._render_locked()
+            self._refresh_stop = threading.Event()
+            self._refresh_thread = threading.Thread(
+                target=self._refresh_loop,
+                args=(self._refresh_stop,),
+                daemon=True,
             )
-            self._status.start()
-        except ImportError:
-            sys.stderr.write(f"\r\033[K⠋ {msg}")
-            sys.stderr.flush()
+            self._refresh_thread.start()
 
     def update(self, msg):
-        self._msg = msg
-        if self._status:
-            elapsed = time.time() - self._start_time if self._start_time else 0
-            self._status.update(f"[bold cyan]{msg}[/] [dim]({elapsed:.1f}s)[/]")
-        elif self.enabled:
-            sys.stderr.write(f"\r\033[K⠋ {msg}")
-            sys.stderr.flush()
+        with self._lock:
+            self._msg = msg
+            self._render_locked()
 
     def stop(self):
-        if self._status:
-            self._status.stop()
-            self._status = None
-        elif self.enabled:
-            sys.stderr.write("\r\033[K")
-            sys.stderr.flush()
+        stop_event = self._refresh_stop
+        refresh_thread = self._refresh_thread
+        self._refresh_stop = None
+        self._refresh_thread = None
+        if stop_event:
+            stop_event.set()
+        if refresh_thread and refresh_thread.is_alive() and refresh_thread is not threading.current_thread():
+            refresh_thread.join(timeout=0.5)
+        with self._lock:
+            self._start_time = None
+            self._msg = ""
+            if self._status:
+                self._status.stop()
+                self._status = None
+                self._console = None
+            elif self.enabled:
+                sys.stderr.write("\r\033[K")
+                sys.stderr.flush()
 
 # ═══════════════════════════════════════════════════════════════════
 # SearXNG — lifecycle management (separate venv)
@@ -7183,7 +7218,7 @@ class OrchestratorApp:
         """Run the orchestrator using Textual TUI."""
         try:
             from textual.app import App, ComposeResult
-            from textual.widgets import Header, Footer, DataTable, Input, RichLog, Static
+            from textual.widgets import Header, Footer, DataTable, RichLog, TextArea
             from textual.binding import Binding
         except ImportError:
             print("Error: textual package not installed. Run: pip install textual", file=sys.stderr)
@@ -7194,15 +7229,24 @@ class OrchestratorApp:
         class OrchestratorTUI(App):
             CSS = """
             DataTable { height: 1fr; }
-            RichLog { height: 1fr; border: solid green; display: none; }
-            RichLog.visible { display: block; }
-            Input { dock: bottom; }
+            #agent_log { height: 1fr; border: solid green; display: none; }
+            #agent_log.visible { display: block; }
+            #chat, #smart_status {
+                dock: bottom;
+                border: solid cyan;
+            }
+            #chat.hidden, #smart_status.hidden { display: none; }
+            #smart_status {
+                display: none;
+                border: solid yellow;
+            }
             """
 
             BINDINGS = [
                 Binding("n", "new_agent", "New Agent", show=True),
                 Binding("s", "smart_launch", "Smart Launch", show=True),
-                Binding("enter", "toggle_expand", "Expand", show=True),
+                Binding("ctrl+enter", "submit_prompt", "Send", show=True),
+                Binding("e", "toggle_expand", "Expand", show=True),
                 Binding("t", "terminate", "Terminate", show=True),
                 Binding("i", "live_input", "Live Input", show=True),
                 Binding("c", "copy_log", "Copy Log", show=True),
@@ -7214,13 +7258,82 @@ class OrchestratorApp:
                 yield Header(show_clock=True)
                 yield DataTable(id="agents")
                 yield RichLog(id="agent_log", wrap=True)
-                yield Input(placeholder="Press 'n' for new agent, 's' for smart launch...", id="chat")
+                yield RichLog(id="smart_status", wrap=True, highlight=True)
+                yield TextArea(
+                    id="chat",
+                    soft_wrap=True,
+                    show_line_numbers=False,
+                    placeholder=self._format_chat_placeholder(self._default_chat_placeholder()),
+                )
                 yield Footer()
+
+            def _default_chat_placeholder(self):
+                return "Press 'n' for new agent, 's' for smart launch, or 'i' for live input."
+
+            def _format_chat_placeholder(self, prompt):
+                return f"{prompt}\nCtrl+Enter submits. Enter inserts a newline."
+
+            def _query_chat(self):
+                return self.query_one("#chat")
+
+            def _query_smart_status(self):
+                return self.query_one("#smart_status")
+
+            def _composer_max_height(self):
+                return max(6, max(self.size.height, 12) // 2)
+
+            def _update_chat_height(self):
+                chat = self._query_chat()
+                line_count = max(1, chat.text.count("\n") + 1)
+                chat.styles.height = min(max(line_count + 2, 3), self._composer_max_height())
+
+            def _update_smart_status_height(self):
+                status = self._query_smart_status()
+                line_count = max(1, len(getattr(self, "_smart_status_lines", [])))
+                status.styles.height = min(max(line_count + 2, 4), self._composer_max_height())
+
+            def _show_chat(self, mode, placeholder):
+                status = self._query_smart_status()
+                chat = self._query_chat()
+                status.add_class("hidden")
+                chat.remove_class("hidden")
+                chat.placeholder = self._format_chat_placeholder(placeholder)
+                chat.clear()
+                chat._mode = mode
+                self._update_chat_height()
+                chat.focus()
+
+            def _show_smart_status(self, heading):
+                chat = self._query_chat()
+                status = self._query_smart_status()
+                chat.add_class("hidden")
+                status.remove_class("hidden")
+                status.clear()
+                self._smart_status_lines = []
+                self._smart_running = True
+                self._append_smart_status(heading)
+
+            def _append_smart_status(self, message):
+                status = self._query_smart_status()
+                self._smart_status_lines.append(message)
+                status.write(message)
+                self._update_smart_status_height()
+
+            def _finish_smart_status(self, message=None):
+                if message:
+                    self._append_smart_status(message)
+                self._smart_running = False
+                self._append_smart_status("Ready for another prompt: press 'n', 's', or 'i'.")
 
             def on_mount(self):
                 table = self.query_one(DataTable)
                 table.add_columns("ID", "Status", "Phase", "Elapsed", "Cost", "Prompt")
                 table.cursor_type = "row"
+                self._smart_running = False
+                self._smart_status_lines = []
+                chat = self._query_chat()
+                chat._mode = "new"
+                self._update_chat_height()
                 # Start shared SearXNG instance for all child agents
                 searxng = SearXNG()
                 if searxng.start():
@@ -7228,19 +7341,19 @@ class OrchestratorApp:
                     orchestrator._searxng = searxng
                     self.notify(f"SearXNG started on port {searxng.port}")
 
+            def on_resize(self, event):
+                self._update_chat_height()
+                self._update_smart_status_height()
+
+            def on_text_area_changed(self, event):
+                if getattr(event.text_area, "id", None) == "chat":
+                    self._update_chat_height()
+
             async def action_new_agent(self):
-                inp = self.query_one(Input)
-                inp.focus()
-                inp.placeholder = "Enter prompt for new agent (press Enter to launch)..."
-                inp.value = ""
-                inp._mode = "new"
+                self._show_chat("new", "Enter prompt for new agent...")
 
             async def action_smart_launch(self):
-                inp = self.query_one(Input)
-                inp.focus()
-                inp.placeholder = "Enter meta-prompt for smart launcher..."
-                inp.value = ""
-                inp._mode = "smart"
+                self._show_chat("smart", "Enter meta-prompt for smart launcher...")
 
             async def action_toggle_expand(self):
                 table = self.query_one(DataTable)
@@ -7255,7 +7368,7 @@ class OrchestratorApp:
                 if not session:
                     return
                 session["expanded"] = not session["expanded"]
-                log_widget = self.query_one(RichLog)
+                log_widget = self.query_one("#agent_log")
                 if session["expanded"]:
                     orchestrator.selected_id = sid
                     log_widget.add_class("visible")
@@ -7291,11 +7404,7 @@ class OrchestratorApp:
                     sid = int(table.get_row_at(row_key)[0])
                 except (ValueError, IndexError):
                     return
-                inp = self.query_one(Input)
-                inp.focus()
-                inp.placeholder = f"Live input to Agent {sid}..."
-                inp.value = ""
-                inp._mode = f"live:{sid}"
+                self._show_chat(f"live:{sid}", f"Live input to Agent {sid}...")
 
             async def action_copy_log(self):
                 table = self.query_one(DataTable)
@@ -7333,13 +7442,15 @@ class OrchestratorApp:
                     except Exception as e:
                         self.notify(f"Copy failed: {e}", severity="error")
 
-            async def on_input_submitted(self, event):
-                text = event.value.strip()
-                event.input.value = ""
+            async def action_submit_prompt(self):
+                chat = self._query_chat()
+                if chat.has_class("hidden"):
+                    return
+                text = chat.text.strip()
                 if not text:
                     return
 
-                mode = getattr(event.input, '_mode', 'new')
+                mode = getattr(chat, '_mode', 'new')
 
                 if mode == "smart":
                     await self._do_smart_launch(text)
@@ -7347,11 +7458,11 @@ class OrchestratorApp:
                     sid = int(mode.split(":")[1])
                     orchestrator._send_control(sid, "live_input", text)
                     self.notify(f"Live input sent to Agent {sid}")
+                    self._show_chat("new", self._default_chat_placeholder())
                 else:
-                    await self._do_launch(text)
-
-                event.input.placeholder = "Press 'n' for new agent, 's' for smart launch..."
-                event.input._mode = "new"
+                    sid = await self._do_launch(text)
+                    if sid is not None:
+                        self._show_chat("new", self._default_chat_placeholder())
 
             async def _do_launch(self, prompt, label=None, max_loops=None):
                 async with orchestrator._launch_lock:
@@ -7432,7 +7543,7 @@ class OrchestratorApp:
                 session = orchestrator.sessions[sid]
                 proc = session["proc"]
                 table = self.query_one(DataTable)
-                log_widget = self.query_one(RichLog)
+                log_widget = self.query_one("#agent_log")
 
                 async for line in proc.stdout:
                     decoded = line.decode(errors="replace").strip()
@@ -7606,7 +7717,7 @@ class OrchestratorApp:
                 return f"Unknown tool: {name}"
 
             async def _do_smart_launch(self, meta_prompt):
-                self.notify("Smart launcher processing...", severity="information")
+                self._show_smart_status("Smart launcher processing...")
                 self.run_worker(self._smart_launch_worker(meta_prompt), exclusive=True)
 
             async def _smart_launch_worker(self, meta_prompt):
@@ -7621,9 +7732,9 @@ class OrchestratorApp:
                 try:
                     async with httpx.AsyncClient(timeout=600) as client:
                         for turn in range(max_turns):
-                            self.notify(
-                                f"Smart orchestrator: turn {turn + 1}...",
-                                severity="information")
+                            self._append_smart_status(
+                                f"Turn {turn + 1}: querying orchestrator model..."
+                            )
 
                             resp = await client.post(
                                 OPENROUTER_URL,
@@ -7641,15 +7752,15 @@ class OrchestratorApp:
 
                             if "error" in data:
                                 err = data["error"]
-                                self.notify(
-                                    f"Smart orchestrator API error: {err.get('message', err)}",
-                                    severity="error")
+                                self._finish_smart_status(
+                                    f"Smart orchestrator API error: {err.get('message', err)}"
+                                )
                                 break
 
                             if not data.get("choices"):
-                                self.notify(
-                                    "Smart orchestrator: empty response from model.",
-                                    severity="error")
+                                self._finish_smart_status(
+                                    "Smart orchestrator: empty response from model."
+                                )
                                 break
 
                             msg = data["choices"][0]["message"]
@@ -7661,29 +7772,29 @@ class OrchestratorApp:
                             # No tool calls → orchestrator is done
                             if not tool_calls:
                                 if text:
-                                    self.notify(
-                                        f"Smart orchestrator done: {text[:200]}",
-                                        severity="information")
+                                    self._finish_smart_status(
+                                        f"Smart orchestrator done: {text[:200]}"
+                                    )
                                 else:
-                                    self.notify(
-                                        "Smart orchestrator complete.",
-                                        severity="information")
+                                    self._finish_smart_status(
+                                        "Smart orchestrator complete."
+                                    )
                                 break
 
                             if text:
-                                self.notify(
-                                    f"Orchestrator: {text[:150]}",
-                                    severity="information")
+                                self._append_smart_status(
+                                    f"Orchestrator: {text[:150]}"
+                                )
 
                             # Count launches for notification
                             n_launches = sum(
                                 1 for tc in tool_calls
                                 if tc["function"]["name"] == "launch_agent")
                             if n_launches:
-                                self.notify(
+                                self._append_smart_status(
                                     f"Launching {n_launches} agent"
-                                    f"{'s' if n_launches != 1 else ''}...",
-                                    severity="information")
+                                    f"{'s' if n_launches != 1 else ''}..."
+                                )
 
                             # Execute all tool calls in parallel
                             async def _exec_tc(tc):
@@ -7715,12 +7826,12 @@ class OrchestratorApp:
                                 *[_exec_tc(tc) for tc in tool_calls])
                             messages.extend(results)
                         else:
-                            self.notify(
-                                f"Smart orchestrator: hit {max_turns}-turn limit.",
-                                severity="warning")
+                            self._finish_smart_status(
+                                f"Smart orchestrator: hit {max_turns}-turn limit."
+                            )
 
                 except Exception as e:
-                    self.notify(f"Smart orchestrator error: {e}", severity="error")
+                    self._finish_smart_status(f"Smart orchestrator error: {e}")
 
         tui = OrchestratorTUI()
         tui.title = "dothething orchestrator"
