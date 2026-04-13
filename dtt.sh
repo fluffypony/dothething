@@ -338,6 +338,8 @@ MAX_LOOPS       = 200
 DEFAULT_CMD_TIMEOUT = 300
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_INLINE_BYTES = 5 * 1024 * 1024
+DEFAULT_HEADLESS_VIEWPORT_WIDTH = 1280
+DEFAULT_HEADLESS_VIEWPORT_HEIGHT = 1080
 
 def _make_headers(api_key):
     return {
@@ -670,6 +672,8 @@ class Browser:
                     browser_type="camoufox",
                     solve_captchas=bool(os.environ.get("TWOCAPTCHA_API_KEY")),
                     perception_type="fast",
+                    viewport_width=DEFAULT_HEADLESS_VIEWPORT_WIDTH,
+                    viewport_height=DEFAULT_HEADLESS_VIEWPORT_HEIGHT,
                 )
                 await self._session.__aenter__()
         return self._session
@@ -5066,6 +5070,8 @@ class Agent:
                 browser_type="camoufox",
                 solve_captchas=bool(os.environ.get("TWOCAPTCHA_API_KEY")),
                 perception_type="fast",
+                viewport_width=DEFAULT_HEADLESS_VIEWPORT_WIDTH,
+                viewport_height=DEFAULT_HEADLESS_VIEWPORT_HEIGHT,
             ) as session:
                 if url:
                     nav = session.execute(type="goto", url=url)
