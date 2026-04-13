@@ -4110,20 +4110,23 @@ class Agent:
             "You are an external oracle assisting a general-purpose autonomous AI agent. "
             "It handles research, analysis, report generation, data processing, structured "
             "data extraction, and automation — not only code. "
-            "Answer rigorously. If context is provided, use it. Be concrete and actionable."
+            "Answer rigorously. If context is provided, use it. Be concrete and actionable. "
+            "If asked to validate completeness, check the original user request against "
+            "what has been accomplished and identify any gaps, missing items, or "
+            "requirements that have not been fully addressed."
         )
         if include_context:
             # Build condensed context
             for m in self.messages:
                 if m.get("role") == "tool":
                     c = m.get("content", "")
-                    if len(c) > 2000:
-                        c = c[:2000] + "…[truncated]"
+                    if len(c) > 10000:
+                        c = c[:10000] + "…[truncated]"
                     msgs.append({"role": "user", "content": f"[Tool result: {c}]"})
                 elif m.get("role") == "assistant":
                     c = m.get("content") or ""
                     if c:
-                        msgs.append({"role": "assistant", "content": c[:4000]})
+                        msgs.append({"role": "assistant", "content": c[:16000]})
                 elif m.get("role") in ("system", "user"):
                     msgs.append(m)
         msgs.append({"role": "user", "content": question})
@@ -4161,6 +4164,28 @@ class Agent:
 
     async def _tool_finalize(self, report="Task completed.", files=None,
                               sources=None, status=None, **kw):
+        # Suggest oracle verification for complex tasks (fires once)
+        if (self.plan.items and len(self.plan.items) >= 5
+                and not self._oracle_verify_suggested):
+            # Check if oracle was called recently with context
+            recent_oracle = any(
+                tc.get("function", {}).get("name") == "oracle"
+                for m in self.messages[-10:]
+                if m.get("role") == "assistant"
+                for tc in (m.get("tool_calls") or [])
+            )
+            if not recent_oracle and (status or "complete") == "complete":
+                self._oracle_verify_suggested = True
+                return (
+                    "SUGGESTION: This was a complex task (plan had "
+                    f"{len(self.plan.items)} items). Consider calling oracle with "
+                    "include_context=true to verify completeness before finalizing. "
+                    "Example: oracle(question='Review my work against the original "
+                    "task. Is anything missing, incorrect, or incomplete?', "
+                    "include_context=true). If you've already verified or this is "
+                    "unnecessary, call finalize again to proceed."
+                )
+
         # Pre-finalize validation: check plan completion
         if self.plan.items:
             remaining = sum(1 for i in self.plan.items if not i.get("done"))
