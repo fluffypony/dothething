@@ -4898,10 +4898,23 @@ class Agent:
                                             headers={"User-Agent": "Mozilla/5.0 (compatible)"},
                                         )
                                         if page_resp.status_code == 200:
-                                            ct = page_resp.headers.get("content-type", "")
-                                            if "html" in ct or "text" in ct:
+                                            ct = page_resp.headers.get("content-type", "").lower()
+                                            body_text = page_resp.text
+                                            body_prefix = body_text.lstrip()[:128].lower()
+                                            is_xml = (
+                                                "xml" in ct
+                                                or body_prefix.startswith("<?xml")
+                                                or body_prefix.startswith("<rss")
+                                                or body_prefix.startswith("<feed")
+                                                or body_prefix.startswith("<urlset")
+                                                or body_prefix.startswith("<sitemapindex")
+                                            )
+                                            if "html" in ct or "text" in ct or is_xml:
                                                 from bs4 import BeautifulSoup
-                                                soup = BeautifulSoup(page_resp.text, "lxml")
+                                                soup = BeautifulSoup(
+                                                    body_text,
+                                                    "xml" if is_xml else "lxml",
+                                                )
                                                 for tag in soup(["script", "style", "nav",
                                                                  "footer", "header", "aside",
                                                                  "iframe", "noscript", "svg"]):
@@ -4911,7 +4924,7 @@ class Agent:
                                                     text = truncate_to_tokens(text, 5000)
                                                     return f"### {title}\nSource: {url}\n{text}"
                                                 elif "text" in ct:
-                                                    text = truncate_to_tokens(page_resp.text, 5000)
+                                                    text = truncate_to_tokens(body_text, 5000)
                                                     return f"### {title}\nSource: {url}\n{text}"
                                     except Exception:
                                         pass
