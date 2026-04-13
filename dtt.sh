@@ -424,6 +424,18 @@ def _rank_and_dedupe_search_results(results, requested_engines=None):
         deduped.append(result)
     return deduped
 
+def _format_duration(seconds):
+    total_seconds = max(0, int(round(seconds or 0)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
 _tiktoken_enc = None
 def count_tokens(text):
     global _tiktoken_enc
@@ -3696,6 +3708,8 @@ class Agent:
         self._final_files = []
         self._final_sources = []
         self._final_status = "complete"
+        self._session_started_at = time.time()
+        self._tool_time_totals = {}
         # File-level locking for parallel edit safety
         self._file_locks = {}
         self._file_locks_lock = asyncio.Lock()
@@ -6677,6 +6691,7 @@ class Agent:
     async def _execute_tools(self, tool_calls):
         async def exec_one(tc):
             name = tc["function"]["name"]
+            tool_started_at = time.time()
             try:
                 args = json.loads(tc["function"]["arguments"])
             except (json.JSONDecodeError, TypeError):
@@ -6760,7 +6775,18 @@ class Agent:
 
             tag = "raw" if (not result_mode or result_mode.lower() == "raw") else "sum"
             tok = count_tokens(final) if isinstance(final, str) else 0
-            self.events.emit("tool_end", name=name, result_len=tok)
+            duration_sec = time.time() - tool_started_at
+            stats = self._tool_time_totals.setdefault(
+                name, {"duration_sec": 0.0, "calls": 0}
+            )
+            stats["duration_sec"] += duration_sec
+            stats["calls"] += 1
+            self.events.emit(
+                "tool_end",
+                name=name,
+                result_len=tok,
+                duration_sec=round(duration_sec, 3),
+            )
             print(
                 f"  ⚡ {name}" + (f" → {brief}" if brief else "") + f"  [{tok:,} tok {tag}]",
                 file=sys.stderr,
@@ -6814,8 +6840,10 @@ class Agent:
             return
         rpt = self.cost_tracker.report()
         total = self.cost_tracker.total_cost
+        session_duration = time.time() - self._session_started_at
         self.events.emit("cost", total=total)
         print(f"\n{'━' * 58}", file=sys.stderr)
+        print(f"  Session time: {_format_duration(session_duration)}", file=sys.stderr)
         print(f"  Session cost: ${total:.4f}", file=sys.stderr)
         for model, d in sorted(rpt.items()):
             parts = [f"${d['cost']:.4f}", f"{d['calls']} call{'s' if d['calls']!=1 else ''}"]
@@ -6827,6 +6855,19 @@ class Agent:
             print(f"    {model}: {', '.join(parts)}", file=sys.stderr)
         if not rpt:
             print("    (no stats collected)", file=sys.stderr)
+        top_tools = sorted(
+            self._tool_time_totals.items(),
+            key=lambda item: item[1]["duration_sec"],
+            reverse=True,
+        )[:3]
+        if top_tools:
+            print("  Most time spent on:", file=sys.stderr)
+            for tool_name, stats in top_tools:
+                print(
+                    f"    {tool_name}: {_format_duration(stats['duration_sec'])}, "
+                    f"{stats['calls']} call{'s' if stats['calls'] != 1 else ''}",
+                    file=sys.stderr,
+                )
         if self._browser_agent_used:
             print("    (Note: browser_agent LLM calls via Notte are not included in this total.)", file=sys.stderr)
         print(f"{'━' * 58}", file=sys.stderr)
