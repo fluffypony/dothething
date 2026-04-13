@@ -125,6 +125,7 @@ Flags:
 
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
+  SERPER_API_KEY         Optional. Uses Serper for batch_process search enrichment.
   TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
   AGENTMAIL_API_KEY      Optional. AgentMail key for email tools.
   AGENTMAIL_INBOX_ID     Optional. Default AgentMail inbox ID.
@@ -990,7 +991,7 @@ _SENSITIVE_VALUE_RE = re.compile(
 
 def _collect_secret_values():
     secrets = set()
-    for env_key in ("OPENROUTER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
+    for env_key in ("OPENROUTER_API_KEY", "SERPER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
         val = os.environ.get(env_key, "")
         if val and len(val) > 8:
             secrets.add(val)
@@ -2673,9 +2674,10 @@ TOOLS = [
                 "processed independently with the same instruction template. Use for: bulk "
                 "research, classification, extraction, enrichment. Results are collected "
                 "into a JSON array and written to output_file.\n\n"
-                "If enrich_with_search is true, each item is searched via SearXNG (using "
-                "search_query_template for targeted queries like '2026 current CEO {item}') "
-                "and the top 20 results have their full page content fetched and truncated "
+                "If enrich_with_search is true, each item is searched via Serper when "
+                "SERPER_API_KEY is set, otherwise via SearXNG (using search_query_template "
+                "for targeted queries like '2026 current CEO {item}'). The top 20 results "
+                "then have their page content fetched via httpx + BeautifulSoup and truncated "
                 "to ~5000 tokens each, giving Sonnet rich source material to work with.\n\n"
                 "For large datasets (500+ items), split into chunks and call batch_process "
                 "repeatedly (e.g. 30 calls of 50 items each). Repeated batch_process calls "
@@ -2704,12 +2706,12 @@ TOOLS = [
                     },
                     "enrich_with_search": {
                         "type": "boolean",
-                        "description": "Search SearXNG for each item first (default: false)",
+                        "description": "Search Serper (if SERPER_API_KEY is set) or SearXNG for each item first (default: false)",
                     },
                     "search_query_template": {
                         "type": "string",
                         "description": (
-                            "Template for the SearXNG search query when enrich_with_search is true. "
+                            "Template for the per-item search query when enrich_with_search is true. "
                             "Use {item} as placeholder. Example: '2026 current CEO {item}'. "
                             "Defaults to the raw item text if not provided."
                         ),
@@ -3750,7 +3752,15 @@ class Agent:
 
     # ── Setup ────────────────────────────────────────────────────
     async def setup(self):
-        self.http = httpx.AsyncClient(timeout=1800)
+        # The shared client serves all model calls, search enrichment, and fetches.
+        # Raise pool limits so parallel batch workloads don't stall behind httpx defaults.
+        self.http = httpx.AsyncClient(
+            timeout=1800,
+            limits=httpx.Limits(
+                max_connections=500,
+                max_keepalive_connections=100,
+            ),
+        )
         self.cost_tracker.start(self.http)
 
         if getattr(self, '_skip_searxng_start', False):
@@ -4215,6 +4225,50 @@ class Agent:
             return f"[UNTRUSTED EXTERNAL CONTENT — source: {url}]\n\n{result}"
         except Exception as e:
             return f"Error fetching {url}: {e}"
+
+    async def _batch_search_results(self, query, num_results=20):
+        serper_api_key = os.environ.get("SERPER_API_KEY")
+        if serper_api_key:
+            try:
+                resp = await self.http.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": serper_api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query, "num": num_results},
+                    timeout=20,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    organic = data.get("organic", [])[:num_results]
+                    return [
+                        {
+                            "title": item.get("title", ""),
+                            "url": item.get("link", ""),
+                            "content": item.get("snippet", ""),
+                            "engine": "google",
+                        }
+                        for item in organic
+                        if item.get("link")
+                    ]
+            except Exception:
+                pass
+
+        if not self.searxng or not self.searxng.url:
+            return []
+
+        try:
+            resp = await self.http.get(
+                f"{self.searxng.url}/search",
+                params={"q": query, "format": "json"},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                return []
+            return _rank_and_dedupe_search_results(resp.json().get("results", []))[:num_results]
+        except Exception:
+            return []
 
     async def _tool_plan_create(self, items, **kw):
         return self.plan.create(items)
@@ -4948,7 +5002,7 @@ class Agent:
                 item_str = json.dumps(item) if isinstance(item, (dict, list)) else str(item)
                 search_context = ""
 
-                if enrich_with_search and self.searxng and self.searxng.url:
+                if enrich_with_search and (os.environ.get("SERPER_API_KEY") or (self.searxng and self.searxng.url)):
                     try:
                         # Build query from template or raw item text
                         if search_query_template:
@@ -4956,23 +5010,8 @@ class Agent:
                         else:
                             search_q = item_str[:500]
 
-                        resp = await self.http.get(
-                            f"{self.searxng.url}/search",
-                            params={"q": search_q, "format": "json"},
-                            timeout=20,
-                        )
-                        if resp.status_code == 200:
-                            sr = resp.json().get("results", [])[:20]
-
-                            # Deduplicate by URL
-                            seen_urls = set()
-                            deduped = []
-                            for r in sr:
-                                url = r.get("url", "")
-                                if url and url not in seen_urls:
-                                    seen_urls.add(url)
-                                    deduped.append(r)
-                            sr = deduped
+                        sr = await self._batch_search_results(search_q, num_results=20)
+                        if sr:
 
                             async def _fetch_result_content(r):
                                 url = r.get("url", "")
@@ -6556,7 +6595,7 @@ class Agent:
 
     def _redact_debug_str(self, text):
         """Redact known secrets from a debug string."""
-        for env_key in ("OPENROUTER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
+        for env_key in ("OPENROUTER_API_KEY", "SERPER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
             val = os.environ.get(env_key, "")
             if val and len(val) > 8:
                 text = text.replace(val, val[:4] + "..." + val[-4:])

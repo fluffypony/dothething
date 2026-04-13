@@ -182,6 +182,7 @@ The agent discovers and uses all tools exposed by connected MCP servers.
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | Yes | Your OpenRouter API key |
+| `SERPER_API_KEY` | No | Enables Serper-backed `batch_process` search enrichment |
 | `TWOCAPTCHA_API_KEY` | No | Enables automated captcha solving |
 | `AGENTMAIL_API_KEY` | No | AgentMail key for email tools |
 | `AGENTMAIL_INBOX_ID` | No | Default AgentMail inbox ID |
@@ -193,7 +194,7 @@ All variables can be saved to `~/.dtt/env` (shell-exported values take precedenc
 
 | Path | What's there |
 |---|---|
-| `~/.dtt/env` | Saved API keys for OpenRouter, 2Captcha, and AgentMail. Mode 0600. The agent can update this via manage_config. |
+| `~/.dtt/env` | Saved API keys for OpenRouter, Serper, 2Captcha, and AgentMail. Mode 0600. The agent can update this via manage_config. |
 | `~/.dtt/threads/` | Saved conversation threads (resume with `--resume`) |
 | `~/.dtt/threads/<id>/cache/` | Per-thread scratch folder (intermediate files, downloads, batch artifacts) |
 | `~/.dtt/skills/<name>/SKILL.md` | User-defined skills (Claude Code convention) |
