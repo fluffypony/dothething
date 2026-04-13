@@ -4763,7 +4763,8 @@ class Agent:
             return f"Skill execution error: {e}"
 
     async def _tool_batch_process(self, items_file, instruction_template, output_file,
-                                   enrich_with_search=False, concurrency=10, **kw):
+                                   enrich_with_search=False, search_query_template=None,
+                                   concurrency=50, **kw):
         p = resolve_path(self.cwd, items_file)
         if not p.exists():
             return f"Error: Items file not found: {items_file}"
@@ -4778,11 +4779,19 @@ class Agent:
         if not items:
             return "Error: No items found in file."
 
-        concurrency = max(1, min(int(concurrency or 10), 20))
+        concurrency = max(1, min(int(concurrency or 50), 50))
         semaphore = asyncio.Semaphore(concurrency)
         results = [None] * len(items)
         completed = [0]
         errors = [0]
+
+        # Incremental checkpoint for crash resilience
+        checkpoint_path = resolve_path(self.cwd, output_file + ".partial")
+        checkpoint_lock = asyncio.Lock()
+
+        # Global semaphore for page fetches during search enrichment
+        # Caps total concurrent HTTP page fetches across all items
+        page_fetch_semaphore = asyncio.Semaphore(100)
 
         async def process_one(idx, item):
             async with semaphore:
@@ -4791,19 +4800,75 @@ class Agent:
 
                 if enrich_with_search and self.searxng and self.searxng.url:
                     try:
-                        search_q = item_str[:200]
+                        # Build query from template or raw item text
+                        if search_query_template:
+                            search_q = search_query_template.replace("{item}", item_str[:500])
+                        else:
+                            search_q = item_str[:500]
+
                         resp = await self.http.get(
                             f"{self.searxng.url}/search",
                             params={"q": search_q, "format": "json"},
-                            timeout=15,
+                            timeout=20,
                         )
                         if resp.status_code == 200:
-                            sr = resp.json().get("results", [])[:5]
-                            search_context = "\n".join(
-                                f"- {r.get('title', '')}: {r.get('content', '')[:200]} "
-                                f"({r.get('url', '')})"
-                                for r in sr
+                            sr = resp.json().get("results", [])[:20]
+
+                            # Deduplicate by URL
+                            seen_urls = set()
+                            deduped = []
+                            for r in sr:
+                                url = r.get("url", "")
+                                if url and url not in seen_urls:
+                                    seen_urls.add(url)
+                                    deduped.append(r)
+                            sr = deduped
+
+                            async def _fetch_result_content(r):
+                                url = r.get("url", "")
+                                title = r.get("title", "")
+                                snippet = r.get("content", "")
+                                if not url:
+                                    return f"- {title}: {snippet}" if title else ""
+                                async with page_fetch_semaphore:
+                                    try:
+                                        page_resp = await self.http.get(
+                                            url, timeout=10, follow_redirects=True,
+                                            headers={"User-Agent": "Mozilla/5.0 (compatible)"},
+                                        )
+                                        if page_resp.status_code == 200:
+                                            ct = page_resp.headers.get("content-type", "")
+                                            if "html" in ct or "text" in ct:
+                                                from bs4 import BeautifulSoup
+                                                soup = BeautifulSoup(page_resp.text, "lxml")
+                                                for tag in soup(["script", "style", "nav",
+                                                                 "footer", "header", "aside",
+                                                                 "iframe", "noscript", "svg"]):
+                                                    tag.decompose()
+                                                text = soup.get_text(separator="\n", strip=True)
+                                                if text:
+                                                    text = truncate_to_tokens(text, 5000)
+                                                    return f"### {title}\nSource: {url}\n{text}"
+                                                elif "text" in ct:
+                                                    text = truncate_to_tokens(page_resp.text, 5000)
+                                                    return f"### {title}\nSource: {url}\n{text}"
+                                    except Exception:
+                                        pass
+                                # Fallback to snippet
+                                return f"- {title} ({url}): {snippet}"
+
+                            enriched = await asyncio.gather(
+                                *[_fetch_result_content(r) for r in sr]
                             )
+                            valid_parts = [e for e in enriched if e]
+                            if valid_parts:
+                                search_context = "\n\n".join(valid_parts)
+                            else:
+                                # Ultimate fallback to snippets only
+                                search_context = "\n".join(
+                                    f"- {r.get('title', '')}: {r.get('content', '')} ({r.get('url', '')})"
+                                    for r in sr
+                                )
                     except Exception:
                         pass
 
@@ -4826,14 +4891,16 @@ class Agent:
                                     {
                                         "role": "system",
                                         "content": (
-                                            "Process this item precisely. Return structured "
-                                            "data only. Do not add preamble or explanation."
+                                            "Process this item precisely. If search results / evidence documents are provided, "
+                                            "use them as your primary source. Prefer explicit facts from the evidence over inference. "
+                                            "If a requested field is not found in the evidence, return null or 'unknown' — do not "
+                                            "guess or fabricate. Preserve source URLs when relevant. Return structured data as requested."
                                         ),
                                     },
                                     {"role": "user", "content": prompt},
                                 ],
                                 "temperature": 0.0,
-                                "max_tokens": 4096,
+                                "max_tokens": 8192 if enrich_with_search else 4096,
                                 "session_id": getattr(self, "_thread_id", "") + ":sonnet",
                             },
                             timeout=60,
@@ -4874,6 +4941,19 @@ class Agent:
                         f"({errors[0]} errors)",
                         file=sys.stderr,
                     )
+                # Write incremental checkpoint every 10 completions
+                if completed[0] % 10 == 0:
+                    async with checkpoint_lock:
+                        try:
+                            checkpoint_path.write_text(
+                                json.dumps(
+                                    [r for r in results if r is not None],
+                                    ensure_ascii=False, indent=2,
+                                ),
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass
 
         self.spinner.update(f"Batch processing {len(items)} items (concurrency={concurrency})...")
         await asyncio.gather(*[process_one(i, item) for i, item in enumerate(items)])
@@ -4883,6 +4963,11 @@ class Agent:
         op.write_text(
             json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # Remove checkpoint now that final output is written
+        try:
+            checkpoint_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         return (
             f"Processed {len(items)} items -> {output_file}\n"
             f"Successful: {len(items) - errors[0]}, Errors: {errors[0]}"
