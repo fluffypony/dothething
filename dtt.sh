@@ -452,6 +452,21 @@ def _format_duration(seconds):
     parts.append(f"{secs}s")
     return " ".join(parts)
 
+def _normalize_thread_totals(data):
+    totals = {"runs": 0, "cost": 0.0, "duration_sec": 0.0}
+    if not isinstance(data, dict):
+        return totals
+    try:
+        totals["runs"] = max(0, int(data.get("runs", 0) or 0))
+    except Exception:
+        pass
+    for key in ("cost", "duration_sec"):
+        try:
+            totals[key] = max(0.0, float(data.get(key, 0) or 0))
+        except Exception:
+            pass
+    return totals
+
 _tiktoken_enc = None
 def count_tokens(text):
     global _tiktoken_enc
@@ -3728,6 +3743,10 @@ class Agent:
         self._final_status = "complete"
         self._session_started_at = time.time()
         self._tool_time_totals = {}
+        self._thread_totals_before_run = _normalize_thread_totals(None)
+        self._thread_totals_after_run = _normalize_thread_totals(None)
+        self._thread_totals_persisted = False
+        self._is_resumed_run = False
         # File-level locking for parallel edit safety
         self._file_locks = {}
         self._file_locks_lock = asyncio.Lock()
@@ -6173,6 +6192,7 @@ class Agent:
         now = datetime.now().astimezone()
         thread_id = self.thread_logger.thread_id if self.thread_logger else "unknown"
         self._thread_id = thread_id
+        self._is_resumed_run = bool(resume_messages)
 
         searxng_url = self.searxng.url or "unavailable"
         venv_path = str(VENV)
@@ -6239,8 +6259,11 @@ class Agent:
         # (and record the fresh instructions separately) so subsequent resumes
         # can still show the original task.
         if self.thread_logger:
+            existing_meta = self.thread_logger.load_meta() or {}
+            self._thread_totals_before_run = _normalize_thread_totals(existing_meta.get("thread_totals"))
+            self._thread_totals_after_run = dict(self._thread_totals_before_run)
+            self._thread_totals_persisted = False
             if resume_messages:
-                existing_meta = self.thread_logger.load_meta() or {}
                 existing_meta.setdefault("model", self.model)
                 existing_meta.setdefault("oracle_model", self.oracle_model)
                 existing_meta.setdefault("cwd", str(self.cwd))
@@ -6261,6 +6284,7 @@ class Agent:
                     "prompt": prompt,
                     "started_at": now.isoformat(),
                     "thread_id": thread_id,
+                    "thread_totals": dict(self._thread_totals_before_run),
                 })
             self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
 
@@ -6942,16 +6966,74 @@ class Agent:
         if not sys.stdout.isatty():
             print(report, file=sys.stderr)
 
+    def _compute_thread_totals(self, session_duration=None, session_cost=None):
+        session_duration = (
+            max(0.0, float(session_duration))
+            if session_duration is not None
+            else max(0.0, time.time() - self._session_started_at)
+        )
+        session_cost = (
+            max(0.0, float(session_cost))
+            if session_cost is not None
+            else max(0.0, float(self.cost_tracker.total_cost))
+        )
+        return {
+            "runs": self._thread_totals_before_run["runs"] + 1,
+            "cost": self._thread_totals_before_run["cost"] + session_cost,
+            "duration_sec": self._thread_totals_before_run["duration_sec"] + session_duration,
+        }
+
+    def _persist_thread_totals(self, session_duration=None, session_cost=None):
+        if not self.thread_logger or self._thread_totals_persisted:
+            return
+        try:
+            meta = self.thread_logger.load_meta() or {}
+        except Exception:
+            meta = {}
+        totals = self._compute_thread_totals(session_duration=session_duration, session_cost=session_cost)
+        meta["thread_totals"] = {
+            "runs": totals["runs"],
+            "cost": round(totals["cost"], 6),
+            "duration_sec": round(totals["duration_sec"], 3),
+        }
+        meta["last_run"] = {
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "status": self._final_status,
+            "cost": round(max(0.0, float(session_cost if session_cost is not None else self.cost_tracker.total_cost)), 6),
+            "duration_sec": round(max(0.0, float(session_duration if session_duration is not None else time.time() - self._session_started_at)), 3),
+        }
+        self.thread_logger.save_meta(meta)
+        self._thread_totals_after_run = _normalize_thread_totals(meta["thread_totals"])
+        self._thread_totals_persisted = True
+
     def _show_cost_report(self):
         if self._pipe_mode:
             return
         rpt = self.cost_tracker.report()
         total = self.cost_tracker.total_cost
         session_duration = time.time() - self._session_started_at
+        thread_totals = (
+            self._thread_totals_after_run
+            if self._thread_totals_persisted
+            else _normalize_thread_totals(self._compute_thread_totals(session_duration, total))
+        )
+        show_thread_totals = self._is_resumed_run or bool(self._thread_totals_before_run["runs"])
         self.events.emit("cost", total=total)
         print(f"\n{'━' * 58}", file=sys.stderr)
         print(f"  Session time: {_format_duration(session_duration)}", file=sys.stderr)
+        if show_thread_totals:
+            print(
+                f"  Thread time: {_format_duration(thread_totals['duration_sec'])} "
+                f"across {thread_totals['runs']} run{'s' if thread_totals['runs'] != 1 else ''}",
+                file=sys.stderr,
+            )
         print(f"  Session cost: ${total:.4f}", file=sys.stderr)
+        if show_thread_totals:
+            print(
+                f"  Thread cost: ${thread_totals['cost']:.4f} "
+                f"across {thread_totals['runs']} run{'s' if thread_totals['runs'] != 1 else ''}",
+                file=sys.stderr,
+            )
         for model, d in sorted(rpt.items()):
             parts = [f"${d['cost']:.4f}", f"{d['calls']} call{'s' if d['calls']!=1 else ''}"]
             parts.append(f"{d['in']:,} in / {d['out']:,} out")
@@ -7002,6 +7084,7 @@ class Agent:
         await self.mcp_manager.stop()
         print("  ⏳ Fetching cost data…", file=sys.stderr)
         await self.cost_tracker.drain(timeout=30)
+        self._persist_thread_totals()
         if self.http:
             await self.http.aclose()
         self._show_cost_report()
