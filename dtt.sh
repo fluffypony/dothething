@@ -304,6 +304,7 @@ import fnmatch, difflib, hashlib, base64, mimetypes, uuid
 import tempfile, contextlib
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import httpx
@@ -340,6 +341,21 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_INLINE_BYTES = 5 * 1024 * 1024
 DEFAULT_HEADLESS_VIEWPORT_WIDTH = 1280
 DEFAULT_HEADLESS_VIEWPORT_HEIGHT = 1080
+SEARXNG_ENABLED_ENGINES = [
+    "google",
+    "bing",
+    "duckduckgo",
+    "brave",
+    "google images",
+    "bing images",
+    "google news",
+    "google scholar",
+    "arxiv",
+    "github",
+    "stackoverflow",
+    "wikipedia",
+    "wikidata",
+]
 
 def _make_headers(api_key):
     return {
@@ -348,6 +364,65 @@ def _make_headers(api_key):
         "HTTP-Referer": "https://dotheth.ing",
         "X-Title": "dothething",
     }
+
+def _normalize_engine_name(name):
+    return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+def _build_search_engine_priority(requested_engines=None):
+    if isinstance(requested_engines, str):
+        requested_engines = [part for part in requested_engines.split(",") if part.strip()]
+    engine_names = requested_engines or SEARXNG_ENABLED_ENGINES
+    return {
+        _normalize_engine_name(name): idx
+        for idx, name in enumerate(engine_names)
+    }
+
+def _canonicalize_search_result_url(url):
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        if not parts.scheme and not parts.netloc:
+            return url
+        netloc = parts.netloc.lower()
+        if parts.scheme.lower() == "http" and netloc.endswith(":80"):
+            netloc = netloc[:-3]
+        elif parts.scheme.lower() == "https" and netloc.endswith(":443"):
+            netloc = netloc[:-4]
+        return urlunsplit((
+            parts.scheme.lower(),
+            netloc,
+            parts.path or "/",
+            parts.query,
+            "",
+        ))
+    except Exception:
+        return url
+
+def _rank_and_dedupe_search_results(results, requested_engines=None):
+    engine_priority = _build_search_engine_priority(requested_engines)
+    fallback_priority = len(engine_priority) + 10
+    ranked = []
+    for idx, result in enumerate(results or []):
+        engine_name = _normalize_engine_name(result.get("engine", ""))
+        ranked.append((
+            engine_priority.get(engine_name, fallback_priority),
+            idx,
+            result,
+        ))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+
+    deduped = []
+    seen_urls = set()
+    for _, _, result in ranked:
+        url_key = _canonicalize_search_result_url(result.get("url", ""))
+        if url_key:
+            if url_key in seen_urls:
+                continue
+            seen_urls.add(url_key)
+        deduped.append(result)
+    return deduped
 
 _tiktoken_enc = None
 def count_tokens(text):
@@ -516,7 +591,11 @@ class SearXNG:
         src = BASE / "searxng"
 
         cfg = {
-            "use_default_settings": True,
+            "use_default_settings": {
+                "engines": {
+                    "keep_only": SEARXNG_ENABLED_ENGINES,
+                },
+            },
             "server": {
                 "secret_key": os.urandom(32).hex(),
                 "bind_address": "127.0.0.1",
@@ -528,19 +607,8 @@ class SearXNG:
                 "default_lang": "en",
             },
             "engines": [
-                {"name": "google", "disabled": False},
-                {"name": "bing", "disabled": False},
-                {"name": "duckduckgo", "disabled": False},
-                {"name": "brave", "disabled": False},
-                {"name": "google images", "disabled": False},
-                {"name": "bing images", "disabled": False},
-                {"name": "google news", "disabled": False},
-                {"name": "google scholar", "disabled": False},
-                {"name": "arxiv", "disabled": False},
-                {"name": "github", "disabled": False},
-                {"name": "stackoverflow", "disabled": False},
-                {"name": "wikipedia", "disabled": False},
-                {"name": "wikidata", "disabled": False},
+                {"name": name, "disabled": False}
+                for name in SEARXNG_ENABLED_ENGINES
             ],
         }
 
@@ -4061,7 +4129,10 @@ class Agent:
                 timeout=20,
             )
             data = resp.json()
-            results = data.get("results", [])[:num_results]
+            results = _rank_and_dedupe_search_results(
+                data.get("results", []),
+                requested_engines=engines,
+            )[:num_results]
             out = []
             for r in results:
                 entry = {
