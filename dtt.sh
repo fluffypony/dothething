@@ -125,7 +125,7 @@ Flags:
 
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
-  SERPER_API_KEY         Optional. Uses Serper for batch_process search enrichment.
+  SERPER_API_KEY         Optional. Uses Serper for hybrid general search and batch_process enrichment.
   TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
   AGENTMAIL_API_KEY      Optional. AgentMail key for email tools.
   AGENTMAIL_INBOX_ID     Optional. Default AgentMail inbox ID.
@@ -378,6 +378,17 @@ def _build_search_engine_priority(requested_engines=None):
         for idx, name in enumerate(engine_names)
     }
 
+def _build_search_provider_priority(preferred_providers=None):
+    provider_names = preferred_providers or []
+    return {
+        str(name or "").strip().lower(): idx
+        for idx, name in enumerate(provider_names)
+        if str(name or "").strip()
+    }
+
+def _is_general_search_category(categories):
+    return str(categories or "").strip().lower() in ("", "general")
+
 def _canonicalize_search_result_url(url):
     url = str(url or "").strip()
     if not url:
@@ -401,22 +412,26 @@ def _canonicalize_search_result_url(url):
     except Exception:
         return url
 
-def _rank_and_dedupe_search_results(results, requested_engines=None):
+def _rank_and_dedupe_search_results(results, requested_engines=None, preferred_providers=None):
     engine_priority = _build_search_engine_priority(requested_engines)
-    fallback_priority = len(engine_priority) + 10
+    provider_priority = _build_search_provider_priority(preferred_providers)
+    fallback_provider_priority = len(provider_priority)
+    fallback_engine_priority = len(engine_priority) + 10
     ranked = []
     for idx, result in enumerate(results or []):
+        provider_name = str(result.get("provider", "")).strip().lower()
         engine_name = _normalize_engine_name(result.get("engine", ""))
         ranked.append((
-            engine_priority.get(engine_name, fallback_priority),
+            provider_priority.get(provider_name, fallback_provider_priority),
+            engine_priority.get(engine_name, fallback_engine_priority),
             idx,
             result,
         ))
-    ranked.sort(key=lambda item: (item[0], item[1]))
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
 
     deduped = []
     seen_urls = set()
-    for _, _, result in ranked:
+    for _, _, _, result in ranked:
         url_key = _canonicalize_search_result_url(result.get("url", ""))
         if url_key:
             if url_key in seen_urls:
@@ -2122,11 +2137,12 @@ TOOLS = [
         "function": {
             "name": "search_web",
             "description": (
-                "Search the web via local SearXNG. Returns titles, URLs, and snippets. "
+                "Search the web. For ordinary general queries, blends Serper "
+                "(when SERPER_API_KEY is set) with local SearXNG and deduplicates "
+                "the merged results. Category-, time-, and engine-targeted searches "
+                "use local SearXNG only. Returns titles, URLs, and snippets. "
                 "Use for discovery and orientation; snippets are not authoritative. "
-                "Follow up with fetch_page to verify facts from promising results. "
-                "Use categories for topic-specific results, time_range for freshness, "
-                "and engines to target specific search providers."
+                "Follow up with fetch_page to verify facts from promising results."
             ),
             "parameters": {
                 "type": "object",
@@ -3772,7 +3788,13 @@ class Agent:
             if ok:
                 print(f"  ✓ SearXNG on port {self.searxng.port}", file=sys.stderr)
             else:
-                print("  ⚠ SearXNG unavailable — web search disabled", file=sys.stderr)
+                if os.environ.get("SERPER_API_KEY"):
+                    print(
+                        "  ⚠ SearXNG unavailable — search_web falls back to Serper-only for unfiltered general queries",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("  ⚠ SearXNG unavailable — web search disabled", file=sys.stderr)
 
         # Start MCP servers
         if self.mcp_manager.CONFIG_PATH.exists():
@@ -4139,24 +4161,42 @@ class Agent:
     async def _tool_search_web(self, query, num_results=None, categories=None,
                                time_range=None, engines=None, **kw):
         num_results = num_results or 10
-        if not self.searxng.url:
-            return "Error: SearXNG unavailable. Web search is disabled this session."
+        categories = categories or "general"
+        time_range = time_range or None
+        engines = engines or None
+        can_blend_general_search = (
+            _is_general_search_category(categories)
+            and not time_range
+            and not engines
+            and bool(os.environ.get("SERPER_API_KEY"))
+        )
         try:
-            params = {"q": query, "format": "json", "categories": categories or "general"}
-            if time_range:
-                params["time_range"] = time_range
-            if engines:
-                params["engines"] = engines
-            resp = await self.http.get(
-                f"{self.searxng.url}/search",
-                params=params,
-                timeout=20,
-            )
-            data = resp.json()
-            results = _rank_and_dedupe_search_results(
-                data.get("results", []),
-                requested_engines=engines,
-            )[:num_results]
+            if can_blend_general_search:
+                serper_count = max(num_results, 10)
+                searxng_count = max(num_results * 2, 10)
+                serper_results, searxng_results = await asyncio.gather(
+                    self._serper_search_results(query, num_results=serper_count),
+                    self._searxng_search_results(query, num_results=searxng_count, categories=categories),
+                    return_exceptions=True,
+                )
+                if isinstance(serper_results, Exception):
+                    serper_results = []
+                if isinstance(searxng_results, Exception):
+                    searxng_results = []
+                results = _rank_and_dedupe_search_results(
+                    [*serper_results, *searxng_results],
+                    preferred_providers=["serper", "searxng"],
+                )[:num_results]
+            else:
+                if not self.searxng.url:
+                    return "Error: SearXNG unavailable. Web search is disabled this session."
+                results = await self._searxng_search_results(
+                    query,
+                    num_results=num_results,
+                    categories=categories,
+                    time_range=time_range,
+                    engines=engines,
+                )
             out = []
             for r in results:
                 entry = {
@@ -4165,6 +4205,8 @@ class Agent:
                     "snippet": r.get("content", "")[:500],
                     "engine": r.get("engine", ""),
                 }
+                if r.get("provider"):
+                    entry["provider"] = r["provider"]
                 if r.get("img_src"):
                     entry["img_src"] = r["img_src"]
                 if r.get("thumbnail"):
@@ -4175,6 +4217,63 @@ class Agent:
             return f"[UNTRUSTED SEARCH RESULTS — query: {query}]\n\n{json.dumps(out, ensure_ascii=False, indent=2)}"
         except Exception as e:
             return f"Search error: {e}"
+
+    async def _serper_search_results(self, query, num_results=20):
+        serper_api_key = os.environ.get("SERPER_API_KEY")
+        if not serper_api_key:
+            return []
+        resp = await self.http.post(
+            "https://google.serper.dev/search",
+            headers={
+                "X-API-KEY": serper_api_key,
+                "Content-Type": "application/json",
+            },
+            json={"q": query, "num": num_results},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        results = []
+        for item in data.get("organic", [])[:num_results]:
+            link = item.get("link", "")
+            if not link:
+                continue
+            entry = {
+                "title": item.get("title", ""),
+                "url": link,
+                "content": item.get("snippet", ""),
+                "engine": "google",
+                "provider": "serper",
+            }
+            if item.get("date"):
+                entry["publishedDate"] = item["date"]
+            results.append(entry)
+        return results
+
+    async def _searxng_search_results(self, query, num_results=20, categories=None,
+                                      time_range=None, engines=None):
+        if not self.searxng or not self.searxng.url:
+            return []
+        params = {"q": query, "format": "json", "categories": categories or "general"}
+        if time_range:
+            params["time_range"] = time_range
+        if engines:
+            params["engines"] = engines
+        resp = await self.http.get(
+            f"{self.searxng.url}/search",
+            params=params,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return []
+        results = resp.json().get("results", [])
+        for result in results:
+            result.setdefault("provider", "searxng")
+        return _rank_and_dedupe_search_results(
+            results,
+            requested_engines=engines,
+        )[:num_results]
 
     async def _tool_fetch_page(self, url, mode=None, screenshot_region=None,
                                 extract_selector=None, wait_for=None,
@@ -4227,46 +4326,15 @@ class Agent:
             return f"Error fetching {url}: {e}"
 
     async def _batch_search_results(self, query, num_results=20):
-        serper_api_key = os.environ.get("SERPER_API_KEY")
-        if serper_api_key:
-            try:
-                resp = await self.http.post(
-                    "https://google.serper.dev/search",
-                    headers={
-                        "X-API-KEY": serper_api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={"q": query, "num": num_results},
-                    timeout=20,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    organic = data.get("organic", [])[:num_results]
-                    return [
-                        {
-                            "title": item.get("title", ""),
-                            "url": item.get("link", ""),
-                            "content": item.get("snippet", ""),
-                            "engine": "google",
-                        }
-                        for item in organic
-                        if item.get("link")
-                    ]
-            except Exception:
-                pass
-
-        if not self.searxng or not self.searxng.url:
-            return []
+        try:
+            serper_results = await self._serper_search_results(query, num_results=num_results)
+            if serper_results:
+                return serper_results
+        except Exception:
+            pass
 
         try:
-            resp = await self.http.get(
-                f"{self.searxng.url}/search",
-                params={"q": query, "format": "json"},
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                return []
-            return _rank_and_dedupe_search_results(resp.json().get("results", []))[:num_results]
+            return await self._searxng_search_results(query, num_results=num_results)
         except Exception:
             return []
 

@@ -129,7 +129,7 @@ All calls route through OpenRouter. You only need one API key.
 
 **System:** `run_command`, `shell_session`, `run_code`, `glob`, `list_dir`, `search_file`, `clipboard_copy`, `clipboard_paste`, `request_user_input`
 
-**Web:** `search_web` (with engine/category targeting), `fetch_page` (Notte-powered scraping), `browser_agent` (full interactive control), `http_request`
+**Web:** `search_web` (hybrid Serper + SearXNG for general discovery, plus engine/category targeting), `fetch_page` (Notte-powered scraping), `browser_agent` (full interactive control), `http_request`
 
 **Analysis:** `think`, `oracle`, `delegate`, `analyze_data`, `analyze_image`, `batch_process`
 
@@ -182,7 +182,7 @@ The agent discovers and uses all tools exposed by connected MCP servers.
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | Yes | Your OpenRouter API key |
-| `SERPER_API_KEY` | No | Enables Serper-backed `batch_process` search enrichment |
+| `SERPER_API_KEY` | No | Enables hybrid `search_web` plus Serper-backed `batch_process` search enrichment |
 | `TWOCAPTCHA_API_KEY` | No | Enables automated captcha solving |
 | `AGENTMAIL_API_KEY` | No | AgentMail key for email tools |
 | `AGENTMAIL_INBOX_ID` | No | Default AgentMail inbox ID |
