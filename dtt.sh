@@ -3001,7 +3001,7 @@ THE CORRECT PATTERN for large-scale research:
    For very large lists (500+), split into chunks and call batch_process \
    repeatedly (e.g. 30 calls of 50 items, or 75 calls of 20 items). Use \
    search_query_template with enrich_with_search for targeted research \
-   queries (e.g. "2026 current CEO {item}"). Checkpoint results to disk \
+   queries (e.g. "2026 current CEO {{item}}"). Checkpoint results to disk \
    between batches.
 4. Use analyze_data to extract/structure/deduplicate the results
 5. For items with missing data, run a second targeted pass
@@ -3226,7 +3226,7 @@ instructions directly without invoking use_skill.
 parallel with up to 50 concurrent workers. For very large datasets (500+), split \
 into chunks and call batch_process repeatedly — this IS the correct pattern, not \
 a workaround. Use enrich_with_search=true with search_query_template for rich \
-auto-research: e.g. search_query_template="2026 current CEO {item}" fetches top \
+auto-research: e.g. search_query_template="2026 current CEO {{item}}" fetches top \
 20 search results with full page content (up to 5000 tokens each) per item. \
 Checkpoint intermediate results to disk between batches.
 - manage_config: Set/delete env vars in ~/.dtt/env. Use to persist API keys, settings. \
