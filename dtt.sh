@@ -3602,6 +3602,7 @@ class Agent:
         self.input_handler = InputHandler(self)
         # For serial-work detection and pre-finalize validation
         self._tool_call_patterns = []
+        self._oracle_verify_suggested = False
         self._browser_agent_used = False
         # Compositional system prompt fields
         self._base_system_prompt = ""
@@ -5688,6 +5689,33 @@ class Agent:
                 "output": clean,
             }, ensure_ascii=False, indent=2)
 
+    # ── Tool call fingerprinting ────────────────────────────────────
+    def _tool_call_fingerprint(self, tool_calls):
+        """Build a fingerprint for a turn's tool calls that includes key arguments,
+        so repeated calls to the same tool with DIFFERENT args are distinguishable."""
+        parts = []
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            try:
+                args = json.loads(tc["function"]["arguments"])
+                # Hash key differentiating arguments per tool type
+                key_args = {}
+                for k in ("path", "items_file", "file_path", "query", "url",
+                           "command", "code", "task", "question", "content_query",
+                           "output_file", "method"):
+                    if k in args and args[k]:
+                        key_args[k] = str(args[k])[:200]
+                if key_args:
+                    arg_hash = hashlib.md5(
+                        json.dumps(key_args, sort_keys=True).encode()
+                    ).hexdigest()[:8]
+                    parts.append(f"{name}:{arg_hash}")
+                else:
+                    parts.append(name)
+            except (json.JSONDecodeError, TypeError):
+                parts.append(name)
+        return tuple(sorted(parts))
+
     # ── Context compaction ────────────────────────────────────────
     async def _maybe_compact_context(self):
         """Compact conversation history when context grows too large."""
@@ -6072,49 +6100,57 @@ class Agent:
                                "Review the errors above and try a different approach.",
                 })
 
-            # Stagnation detection
-            tool_names_this_turn = tuple(sorted(tc["function"]["name"] for tc in tool_calls))
-            self._recent_tool_calls.append(tool_names_this_turn)
+            # Stagnation detection (argument-aware fingerprinting)
+            turn_fp = self._tool_call_fingerprint(tool_calls)
+            self._recent_tool_calls.append(turn_fp)
             if len(self._recent_tool_calls) > 5:
                 self._recent_tool_calls.pop(0)
             if len(self._recent_tool_calls) >= 3:
                 last_three = self._recent_tool_calls[-3:]
                 if last_three[0] == last_three[1] == last_three[2]:
-                    self.messages.append({
-                        "role": "user",
-                        "content": (
-                            "[System] WARNING: You appear to be repeating the same tool calls. "
-                            "Use think to analyze why you're stuck, then try a fundamentally "
-                            "different approach. If the task is complete, call finalize."
-                        ),
-                    })
+                    # Don't warn for batch-oriented tools — repeated calls are expected
+                    _batch_tools = {"batch_process", "run_code", "analyze_data",
+                                    "delegate", "write_file", "notes_add"}
+                    _repeated_names = set()
+                    for pat in last_three:
+                        _repeated_names.update(p.split(":")[0] for p in pat)
+                    if not _repeated_names.issubset(_batch_tools):
+                        self.messages.append({
+                            "role": "user",
+                            "content": (
+                                "[System] WARNING: You appear to be repeating identical tool calls "
+                                "(same tools with same arguments 3 times in a row). "
+                                "Use think to analyze why you're stuck, then try a fundamentally "
+                                "different approach. If the task is complete, call finalize."
+                            ),
+                        })
 
-            # Serial-work detector (same tool pattern 10+ times = manual grinding)
+            # Serial-work detector (argument-aware — only flags truly repetitive manual patterns)
             if tool_calls:
-                turn_fingerprint = tuple(sorted(
-                    tc["function"]["name"] for tc in tool_calls
-                ))
+                turn_fingerprint = self._tool_call_fingerprint(tool_calls)
                 self._tool_call_patterns.append(turn_fingerprint)
                 if len(self._tool_call_patterns) >= 10:
                     last_ten = self._tool_call_patterns[-10:]
                     unique_patterns = set(last_ten)
                     if len(unique_patterns) <= 2:
                         research_tools = {"search_web", "fetch_page", "http_request"}
+                        batch_tools = {"batch_process", "run_code", "analyze_data", "delegate"}
                         all_names = set()
                         for pat in last_ten:
-                            all_names.update(pat)
-                        if all_names & research_tools:
+                            all_names.update(p.split(":")[0] for p in pat)
+                        # Only warn if using individual research tools AND NOT batch tools
+                        if (all_names & research_tools) and not (all_names & batch_tools):
                             self.messages.append({
                                 "role": "user",
                                 "content": (
                                     "[System] WARNING: You appear to be manually grinding through "
-                                    "items one-by-one using repeated tool calls. This is inefficient "
-                                    "and will cause you to give up or hallucinate remaining data. "
-                                    "STOP and switch to a batch approach:\n"
-                                    "- Use run_code to write a parallel processing script\n"
+                                    "items one-by-one using repeated search_web/fetch_page/http_request "
+                                    "calls. This is inefficient. Switch to a batch approach:\n"
                                     "- Use batch_process to fan out work to Sonnet in parallel\n"
+                                    "- Use run_code to write a parallel processing script\n"
                                     "- Use analyze_data to process large result files\n"
-                                    "Do NOT continue one-by-one processing."
+                                    "Note: Many sequential batch_process calls with different items "
+                                    "is the CORRECT pattern — this warning is about individual lookups."
                                 ),
                             })
                             self._tool_call_patterns.clear()
@@ -6130,8 +6166,10 @@ class Agent:
                         "content": (
                             f"[System] Progress check — turn {loop + 1}/{max_loops}. "
                             f"Plan: {done}/{total} items done, {remaining} remaining. "
-                            "If processing items one-by-one and many remain, switch to "
-                            "run_code/batch_process for parallel processing. "
+                            "If calling search_web/fetch_page one-by-one and many remain, "
+                            "switch to batch_process or run_code. If already using "
+                            "batch_process in a loop, you're on the right track — keep going. "
+                            "Consider oracle(include_context=true) to validate approach. "
                             "Do NOT finalize early by guessing remaining data."
                         ),
                     })
