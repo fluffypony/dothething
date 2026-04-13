@@ -300,7 +300,7 @@ cat > "$BASE/agent.py" << 'PYTHON_AGENT'
 """dothething — autonomous AI agent | https://dotheth.ing"""
 
 import os, sys, json, time, asyncio, subprocess, socket, re, atexit
-import threading, argparse, shlex, shutil, traceback
+import threading, argparse, shlex, shutil, traceback, copy
 import fnmatch, difflib, hashlib, base64, mimetypes, uuid
 import tempfile, contextlib
 from pathlib import Path
@@ -6222,9 +6222,9 @@ class Agent:
         self._mcp_section = self._build_mcp_section()
         sys_prompt = self._base_system_prompt + self._skills_section + self._mcp_section
 
-        # System message is a two-block array: static (cached) + temporal (refreshed per-turn).
-        # cache_control sits on the static block only, so the temporal block can change every
-        # turn without invalidating the prompt cache.
+        # System message is a two-block array: static (explicitly cached) + temporal
+        # (refreshed per-turn). Additional request-scoped breakpoints are added later
+        # when building the outbound payload for long conversations.
         static_block = {"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}
         temporal_block = self._build_temporal_block()
 
@@ -6685,6 +6685,71 @@ class Agent:
         if isinstance(static_block, dict) and "text" in static_block:
             static_block["text"] = composed
 
+    def _message_content_block_count(self, content):
+        if isinstance(content, str):
+            return 1 if content else 0
+        if isinstance(content, list):
+            return sum(1 for block in content if block not in (None, ""))
+        return 0
+
+    def _mark_cache_breakpoint_on_message(self, message):
+        content = message.get("content")
+        if isinstance(content, str):
+            if not content:
+                return False
+            message["content"] = [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]
+            return True
+        if isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, str):
+                content[-1] = {
+                    "type": "text",
+                    "text": last,
+                    "cache_control": {"type": "ephemeral"},
+                }
+                return True
+            if isinstance(last, dict):
+                last["cache_control"] = {"type": "ephemeral"}
+                return True
+        return False
+
+    def _build_cached_model_messages(self):
+        # Keep self.messages pristine for logging/resume state. Build a request-scoped
+        # copy and add up to two explicit mid-history breakpoints so Anthropic/OpenRouter
+        # can bridge long conversations that exceed the automatic 20-block lookback.
+        payload_messages = copy.deepcopy(self.messages)
+        candidate_positions = []
+        cumulative_blocks = 0
+
+        for idx, message in enumerate(payload_messages[1:], start=1):
+            block_count = self._message_content_block_count(message.get("content"))
+            if not block_count:
+                continue
+            cumulative_blocks += block_count
+            candidate_positions.append((cumulative_blocks, idx))
+
+        chosen_indexes = set()
+        for offset in (20, 40):
+            target = cumulative_blocks - offset
+            if target <= 0:
+                continue
+            candidate_idx = None
+            for end_pos, msg_idx in candidate_positions:
+                if end_pos <= target:
+                    candidate_idx = msg_idx
+                else:
+                    break
+            if candidate_idx is None or candidate_idx in chosen_indexes:
+                continue
+            if self._mark_cache_breakpoint_on_message(payload_messages[candidate_idx]):
+                chosen_indexes.add(candidate_idx)
+
+        return payload_messages
+
     def _redact_debug_str(self, text):
         """Redact known secrets from a debug string."""
         for env_key in ("OPENROUTER_API_KEY", "SERPER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
@@ -6707,9 +6772,10 @@ class Agent:
         self.events.emit("model_start", model=self.model)
         for attempt in range(retries):
             try:
+                payload_messages = self._build_cached_model_messages()
                 payload = {
                     "model": self.model,
-                    "messages": self.messages,
+                    "messages": payload_messages,
                     "tools": list(TOOLS) + self.mcp_manager.get_tool_definitions(),
                     "tool_choice": "auto",
                     "parallel_tool_calls": True,
