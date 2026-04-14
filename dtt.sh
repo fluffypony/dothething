@@ -6386,10 +6386,7 @@ class Agent:
 
             if text and text.strip():
                 self.events.emit("assistant_text", text=text)
-                print(f"\n┌─ Agent {'─' * 50}", file=sys.stderr)
-                for line in text.split("\n"):
-                    print(f"│ {line}", file=sys.stderr)
-                print(f"└{'─' * 57}", file=sys.stderr)
+                self._print_console_block("Agent", text)
 
             tool_calls = msg.get("tool_calls")
 
@@ -6766,6 +6763,21 @@ class Agent:
         )
         return text
 
+    def _print_console_block(self, title, body, indent="    "):
+        if self._pipe_mode:
+            return
+        print("", file=sys.stderr)
+        print(f"  {title}", file=sys.stderr)
+        for line in str(body or "").splitlines():
+            if line.strip():
+                print(f"{indent}{line}", file=sys.stderr)
+            else:
+                print("", file=sys.stderr)
+
+    def _emit_plan_progress(self, tool_name, content):
+        self.events.emit("plan_update", name=tool_name, content=content)
+        self._print_console_block("Plan", content)
+
     # ── Model call with retry ────────────────────────────────────
     async def _call_model(self, retries=3):
         self._refresh_temporal_block()
@@ -6988,6 +7000,8 @@ class Agent:
                 f"  ⚡ {name}" + (f" → {brief}" if brief else "") + f"  [{tok:,} tok {tag}]",
                 file=sys.stderr,
             )
+            if name in ("plan_create", "plan_completed", "plan_update", "plan_remaining"):
+                self._emit_plan_progress(name, final)
 
             return {"role": "tool", "tool_call_id": tc["id"], "content": final}
 
@@ -7291,6 +7305,7 @@ class SingleAgentTUI:
                 a.events.on("tool_start", lambda **d: self._safe_log(f"  ⚡ {d.get('name', '')}..."))
                 a.events.on("tool_end", lambda **d: self._safe_log(f"  ✓ {d.get('name', '')}"))
                 a.events.on("assistant_text", lambda **d: self._safe_log(d.get("text", "")))
+                a.events.on("plan_update", lambda **d: self._safe_log(f"\nPlan\n{d.get('content', '')}"))
                 a.events.on("cost", lambda **d: self._update_title(d))
                 a.events.on("finalized", lambda **d: self._safe_log("✅ Finalized"))
                 a.events.on("turn_start", lambda **d: self._safe_log(f"\n── Turn {d.get('turn', '?')} ──"))
