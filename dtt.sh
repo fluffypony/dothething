@@ -102,11 +102,11 @@ Usage:
            [--notify-email EMAIL] [--max-cost USD]
 
 Flags:
-  --fast          Use anthropic/claude-opus-4.6-fast instead of opus
+  --fast          Use anthropic/claude-opus-4.6-fast instead of opus 4.7
   --prompt "..."  Provide task inline (otherwise opens multiline editor)
   --cwd DIR       Working directory for relative paths (default: .)
   --max-loops N   Maximum agent loop iterations (default: 200)
-  --oraclepro     Use openai/gpt-5.4-pro for oracle (default: openai/gpt-5.4)
+  --oraclepro     Use openai/gpt-5.5-pro for oracle (default: openai/gpt-5.5)
   --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/).
                   Combine with --prompt or positional text, or just let the
                   editor open, to supply fresh instructions on resume.
@@ -331,11 +331,11 @@ VENV            = BASE / "venv"
 DTT_DIR         = Path.home() / ".dtt" / "threads"
 OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
-OPUS            = "anthropic/claude-opus-4.6"
+OPUS            = "anthropic/claude-opus-4.7:online"
 OPUS_FAST       = "anthropic/claude-opus-4.6-fast"
 SONNET          = "anthropic/claude-sonnet-4.6"
-ORACLE_DEFAULT  = "openai/gpt-5.4"
-ORACLE_PRO      = "openai/gpt-5.4-pro"
+ORACLE_DEFAULT  = "openai/gpt-5.5:online"
+ORACLE_PRO      = "openai/gpt-5.5-pro:online"
 MAX_LOOPS       = 200
 DEFAULT_CMD_TIMEOUT = 300
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -2501,7 +2501,7 @@ TOOLS = [
         "function": {
             "name": "oracle",
             "description": (
-                "Consult GPT-5.4 (or GPT-5.4-pro with --oraclepro) for a second opinion or validation. "
+                "Consult GPT-5.5 (or GPT-5.5-pro with --oraclepro) for a second opinion or validation. "
                 "Inexpensive — use freely for: validating plans against the original request, confirming "
                 "analyses, resolving ambiguity, pre-finalize completeness checks. Set include_context=true "
                 "to send the full conversation history — especially recommended before finalize on complex "
@@ -3196,7 +3196,7 @@ ONLY tool call in that response.
 and whenever you need to reason about next steps.
 8. Use notes_add to record key findings, URLs, decisions, and intermediate \
 results during long tasks so you don't lose them to context pressure.
-9. oracle calls a second frontier model (GPT-5.4). It is inexpensive — use \
+9. oracle calls a second frontier model (GPT-5.5). It is inexpensive — use \
 it freely. Good uses: validate your plan against the original instructions, \
 get a second opinion on analysis or interpretation, confirm an ambiguous \
 research finding, sanity-check your final output before finalizing. Set \
@@ -3351,7 +3351,7 @@ work: summarizing documents, extracting structured data, reformatting content, \
 classification. The delegate has NO tools — it only processes text you provide.
 - think: FREE. Use liberally before complex edits, after confusing results, \
 to plan multi-step changes, debug what went wrong.
-- oracle: Inexpensive second opinion from GPT-5.4. Use freely for: validating \
+- oracle: Inexpensive second opinion from GPT-5.5. Use freely for: validating \
 plans against original instructions, confirming analyses, resolving ambiguity, \
 sanity-checking deliverables. Set include_context=true for a full-context \
 review before finalize to verify nothing was missed. Use think for quick \
@@ -8263,7 +8263,7 @@ def main():
         usage="dothething [--fast] [--oraclepro] [--resume ID] [prompt ...]",
     )
     parser.add_argument("--fast", action="store_true", help="Use claude-opus-4.6-fast")
-    parser.add_argument("--oraclepro", action="store_true", help="Use gpt-5.4-pro for oracle (default: gpt-5.4)")
+    parser.add_argument("--oraclepro", action="store_true", help="Use gpt-5.5-pro for oracle (default: gpt-5.5)")
     parser.add_argument("--prompt", type=str, default=None, help="Inline prompt text")
     parser.add_argument("--cwd", type=str, default=".", help="Working directory for relative paths")
     parser.add_argument("--max-loops", type=int, default=MAX_LOOPS, help=f"Maximum agent loops (default: {MAX_LOOPS})")

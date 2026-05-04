@@ -2,7 +2,7 @@
 
 > dothething (DTT) is a fully autonomous AI agent distributed as a single bash script. It runs locally, plans its own work, searches the web, reads and writes files, runs shell commands, browses pages with a real browser, and keeps working until the job is finished. It handles research, analysis, report writing, data extraction, document processing, and system administration. Licensed under BSD 3-Clause.
 
-dothething uses Claude Opus 4.6 via OpenRouter as its primary model, Claude Sonnet 4.6 for result summarization and delegation, and GPT-5.4 as an oracle for second opinions on hard problems. It requires Python 3, Git, and an OpenRouter API key. Everything else is installed automatically on first run into /tmp/dothething/.
+dothething uses Claude Opus 4.7 via OpenRouter as its primary model, Claude Sonnet 4.6 for result summarization and delegation, and GPT-5.5 as an oracle for second opinions on hard problems. It requires Python 3, Git, and an OpenRouter API key. Everything else is installed automatically on first run into /tmp/dothething/.
 
 The agent has 45+ tools across file operations (read, write, edit, batch read, diff), search (glob, list directory, content search via ripgrep), shell execution, web access (SearXNG search, Notte browser with Camoufox stealth Firefox, browser agent for interactive automation, HTTP requests), vision analysis, working memory (notes), task planning, a reasoning scratchpad, delegation to a cheaper model, an oracle for second opinions, self-config management (manage_config, manage_skill, manage_mcp), clipboard access, email via AgentMail, mid-task user input, and a finalize tool to end tasks with structured output.
 
