@@ -933,7 +933,9 @@ class Browser:
                 if os.environ.get("TWOCAPTCHA_API_KEY") and not solve_attempted:
                     solve_attempted = True
                     try:
-                        await session.aexecute(type="captcha_solve", raise_on_failure=False)
+                        solve_result = await session.aexecute(type="captcha_solve", raise_on_failure=False)
+                        if not getattr(solve_result, "success", False):
+                            solve_error = str(getattr(solve_result, "message", solve_result))[:300]
                     except Exception as e:
                         solve_error = str(e)[:300]
                 await page.wait_for_timeout(3000)
@@ -987,6 +989,8 @@ class Browser:
                     if settle.get("solve_attempted")
                     else " Set TWOCAPTCHA_API_KEY to enable automated solving when supported."
                 )
+                if settle.get("solve_error"):
+                    solve_note += f" Solver error: {settle.get('solve_error')}"
                 return (
                     f"Error blocked by security verification at {page.url} "
                     f"after {settle.get('waited_ms', 0)}ms.{solve_note}"
@@ -1014,6 +1018,7 @@ class Browser:
                     "challenge_detected": bool(settle.get("challenge_seen")),
                     "challenge_unresolved": bool(settle.get("challenge")),
                     "captcha_solve_attempted": bool(settle.get("solve_attempted")),
+                    "captcha_solve_error": settle.get("solve_error"),
                     "settle_ms": settle.get("waited_ms", 0),
                 }, ensure_ascii=False, indent=2)
 
