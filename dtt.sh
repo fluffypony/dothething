@@ -287,11 +287,11 @@ if [ ! -f "$BASE/.searxng_v4" ]; then
 fi
 
 # ── Notte browser framework ────────────────────────────────────
-if [ ! -f "$BASE/.notte_v1" ]; then
+if [ ! -f "$BASE/.notte_v2" ]; then
     echo "▸ Installing Notte browser framework (first run)..."
     pip install -q "notte[camoufox,captcha] @ git+https://github.com/fluffypony/notte.git" || { echo "✗ Notte install failed" >&2; exit 1; }
     python -m camoufox fetch || { echo "✗ Camoufox browser fetch failed" >&2; exit 1; }
-    touch "$BASE/.notte_v1"
+    touch "$BASE/.notte_v2"
 fi
 
 # ── Write and exec agent ────────────────────────────────────────
@@ -329,6 +329,20 @@ except ImportError:
 BASE            = Path("/tmp/dothething")
 VENV            = BASE / "venv"
 DTT_DIR         = Path.home() / ".dtt" / "threads"
+
+# DTT always drives Notte through Camoufox. Camoufox returns Playwright
+# objects, so force Notte's backend aliases to Playwright before any Notte
+# modules are imported.
+if "NOTTE_CONFIG_PATH" not in os.environ:
+    _notte_config_path = BASE / "notte_dtt_config.toml"
+    try:
+        _notte_config_path.write_text('browser_backend = "playwright"\n', encoding="utf-8")
+        os.environ["NOTTE_CONFIG_PATH"] = str(_notte_config_path)
+    except Exception:
+        pass
+    finally:
+        del _notte_config_path
+
 OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
 OPUS            = "anthropic/claude-opus-4.7:online"
