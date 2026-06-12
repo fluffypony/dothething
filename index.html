@@ -770,6 +770,7 @@
                         <tr vid="147"><td class="col-key" vid="148">--prompt</td><td class="col-val" vid="149">Initial task description.</td></tr>
                         <tr vid="150"><td class="col-key" vid="151">--fast</td><td class="col-val" vid="152">Swaps to Opus 4.8-fast.</td></tr>
                         <tr vid="153"><td class="col-key" vid="154">--oraclepro</td><td class="col-val" vid="155">Upgrades oracle to GPT-5.5-pro.</td></tr>
+                        <tr><td class="col-key">--max-effort</td><td class="col-val">Raise Fable effort to max, oracle to high.</td></tr>
                         <tr vid="156"><td class="col-key" vid="157">--cwd DIR</td><td class="col-val" vid="158">Set working directory.</td></tr>
                         <tr vid="159"><td class="col-key" vid="160">--resume ID</td><td class="col-val" vid="161">Load thread from ~/.dtt/threads/</td></tr>
                         <tr vid="162"><td class="col-key" vid="163">--max-loops N</td><td class="col-val" vid="164">Limit iteration cycles.</td></tr>
@@ -777,6 +778,11 @@
                         <tr><td class="col-key">--headed</td><td class="col-val">Show the browser window for visual debug.</td></tr>
                         <tr><td class="col-key">--debug</td><td class="col-val">Log raw API payloads and cache metrics.</td></tr>
                         <tr><td class="col-key">--orchestrator</td><td class="col-val">Launch orchestrator mode (multiple parallel agents).</td></tr>
+                        <tr><td class="col-key">--pipe</td><td class="col-val">Final report to stdout; suppress everything else.</td></tr>
+                        <tr><td class="col-key">--tui</td><td class="col-val">Full-screen TUI for single-agent mode.</td></tr>
+                        <tr><td class="col-key">--notify-desktop</td><td class="col-val">Desktop notification when the task finishes.</td></tr>
+                        <tr><td class="col-key">--notify-email EMAIL</td><td class="col-val">Email a notification when the task finishes.</td></tr>
+                        <tr><td class="col-key">--max-cost USD</td><td class="col-val">Stop and checkpoint at this cumulative cost.</td></tr>
                         <tr><td class="col-key">--version / -V</td><td class="col-val">Print version and exit.</td></tr>
                         <tr><td class="col-key">--update</td><td class="col-val">Force an update check (bypasses 6-hour rate limit).</td></tr>
                         <tr><td class="col-key">--keep-temp</td><td class="col-val">Keep /tmp/dothething on exit.</td></tr>

@@ -20,7 +20,7 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 - Sends and receives email through its own inbox via AgentMail
 - Copies to and pastes from your system clipboard, including images
 - Accepts mid-task input. Press any key while it's working to type instructions. Ctrl-Q queues input for after the current step finishes
-- Farms out grunt work to a cheaper model. Asks GPT-5.4 for a second opinion when stuck
+- Farms out grunt work to a cheaper model. Asks GPT-5.5 for a second opinion when stuck
 - Saves full conversation threads so you can resume interrupted work
 - Tracks token usage and dollar cost via OpenRouter, with Anthropic prompt caching for cost reduction
 
@@ -61,7 +61,8 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 | `--fast` | Use claude-opus-4.8-fast:online (cheaper, slightly less capable) |
 | `--cwd DIR` | Set the working directory for file operations (default: `.`) |
 | `--max-loops N` | Cap the number of agent turns (default: 200) |
-| `--oraclepro` | Use GPT-5.4-pro instead of GPT-5.4 for oracle calls |
+| `--oraclepro` | Use GPT-5.5-pro instead of GPT-5.5 for oracle calls |
+| `--max-effort` | Raise Fable reasoning effort to `max` and the GPT-5.5 oracle to `high` (default: `xhigh` for both) |
 | `--resume ID` | Pick up a previous session by thread ID |
 | `--headed` | Show the browser window for visual debugging |
 | `--orchestrator` | Launch orchestrator mode -- run and manage multiple agents from one terminal |
@@ -121,7 +122,7 @@ All calls route through OpenRouter. You only need one API key.
 |---|---|---|
 | Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast |
 | Summarizer, Notte agent, delegate | Claude Sonnet 4.6 | -- |
-| Oracle | GPT-5.4 | `--oraclepro` for GPT-5.4-pro |
+| Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro |
 
 ## Tools
 
