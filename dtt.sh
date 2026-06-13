@@ -1887,7 +1887,7 @@ async def post_completion(http, headers, payload, total_timeout, on_progress=Non
     body["stream_options"] = {"include_usage": True}
     msg = {"role": "assistant", "content": None}
     tool_calls = {}
-    state = {"finish": None, "usage": {}, "id": None, "nc": 0, "cn": 0}
+    state = {"finish": None, "usage": {}, "id": None, "nc": 0, "cn": 0, "last": -1}
 
     async def _run():
         async with http.stream("POST", OPENROUTER_URL, headers=headers, json=body,
@@ -1925,8 +1925,12 @@ async def post_completion(http, headers, payload, total_timeout, on_progress=Non
                     if c:
                         msg["content"] = (msg["content"] or "") + c
                         state["nc"] += len(c)
-                    # Reasoning/thinking deltas are intentionally ignored — we never
-                    # retain them, so they don't accumulate in the context window.
+                    # Reasoning/thinking deltas are NOT stored (they'd bloat context),
+                    # but their length is counted toward the progress meter so it keeps
+                    # advancing while the model is still thinking.
+                    r = delta.get("reasoning")
+                    if isinstance(r, str):
+                        state["nc"] += len(r)
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         slot = tool_calls.setdefault(idx, {"id": None, "type": "function",
@@ -1940,9 +1944,13 @@ async def post_completion(http, headers, payload, total_timeout, on_progress=Non
                             slot["function"]["name"] = fn["name"]
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
+                            state["nc"] += len(fn["arguments"])
                     if ch.get("finish_reason"):
                         state["finish"] = ch["finish_reason"]
-                if on_progress and state["cn"] % 32 == 0:
+                # Update the progress meter whenever the streamed-char count grows,
+                # so it advances steadily even when the model sends few large chunks.
+                if on_progress and state["nc"] != state["last"]:
+                    state["last"] = state["nc"]
                     try:
                         on_progress(state["nc"])
                     except Exception:
