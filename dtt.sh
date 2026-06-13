@@ -8,6 +8,9 @@ _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
 unset _dtt_s
+# The name the user actually invoked us as (e.g. "dtt" if symlinked), preserved
+# across the auto-update re-exec, so runtime hints suggest the right command.
+export DTT_PROG="${DTT_PROG:-$(basename "$0")}"
 
 BASE="/tmp/dothething"
 # Expensive, reinstallable artifacts (main venv + deps, Notte, SearXNG) are
@@ -3633,7 +3636,11 @@ When a command or pipeline produces output you need to inspect or post-process, 
 redirect the FULL output to a file on the FIRST run (`cmd > out.txt 2>&1`), then \
 read/grep/process that file. Don't rely on inline stdout that can be truncated, \
 lost to a broken pipe, or mangled by a delimiter or quoting issue — that forces \
-a wasteful second run. Capture once, then analyze from the file.
+a wasteful second run. Capture once, then analyze from the file. NEVER suppress \
+stderr in commands or scripts you write (no `2>/dev/null`, no swallowed \
+exceptions): you need to see errors. Empty output almost always means a silent \
+error you hid — keep stderr (`2>&1`) so failures show on the first run instead \
+of forcing a blind re-run to find them.
 - search_web: craft queries like a human would. 3-6 keywords. Add year for \
 recency. Use categories='images' for image search, categories='news' for news. \
 Use engines='google,bing' to target specific providers, engines='google scholar' \
@@ -6690,7 +6697,7 @@ class Agent:
                       file=sys.stderr)
                 if self.thread_logger:
                     self.thread_logger.save_messages(self.messages, self._secret_tool_call_ids)
-                print(f"  Resume with: dtt.sh --resume {getattr(self, '_thread_id', 'unknown')}", file=sys.stderr)
+                print(f"  Resume with: {os.environ.get('DTT_PROG', 'dtt')} --resume {getattr(self, '_thread_id', 'unknown')}", file=sys.stderr)
                 self._final_status = "partial"
                 self._final_report = f"Budget limit ${self._max_cost:.2f} reached. Checkpointed for resume."
                 self.events.emit("exit", code=0)
@@ -7834,7 +7841,7 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
         await agent.cleanup()
         if not pipe_mode:
             print(f"\n  ℹ Thread ID: {thread_id}", file=sys.stderr)
-            print(f"    Resume with: dtt.sh --resume {thread_id}", file=sys.stderr)
+            print(f"    Resume with: {os.environ.get('DTT_PROG', 'dtt')} --resume {thread_id}", file=sys.stderr)
 
         # Pipe mode exit codes: 0=complete, 2=partial, 1=failed
         if pipe_mode:
