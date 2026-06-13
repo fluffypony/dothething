@@ -130,6 +130,8 @@ Flags:
   --notify-email EMAIL  Email a notification to EMAIL when the task finishes
   --max-cost USD  Stop and checkpoint when cumulative cost reaches this amount
   --verbose       Verbose error traces
+  --show-full     Stream the model's thinking live and show full, untruncated
+                  tool calls (disables the spinner; verbose firehose)
   --debug         Debug-level logging of API payloads
   --keep-temp     Keep the temp runtime directory on exit
   --version, -V   Print the dothething version and exit
@@ -1904,7 +1906,7 @@ def parse_fallback_tool_calls(text):
 # On HTTP error: {"_status", "_retry_after", "error":{...}}. On stream/timeout
 # error: {"error":{"message":...}}.
 # ═══════════════════════════════════════════════════════════════════
-async def post_completion(http, headers, payload, total_timeout, on_progress=None):
+async def post_completion(http, headers, payload, total_timeout, on_progress=None, on_reasoning=None):
     body = dict(payload)
     body["stream"] = True
     body["stream_options"] = {"include_usage": True}
@@ -1952,8 +1954,13 @@ async def post_completion(http, headers, payload, total_timeout, on_progress=Non
                     # but their length is counted toward the progress meter so it keeps
                     # advancing while the model is still thinking.
                     r = delta.get("reasoning")
-                    if isinstance(r, str):
+                    if isinstance(r, str) and r:
                         state["nc"] += len(r)
+                        if on_reasoning:
+                            try:
+                                on_reasoning(r)
+                            except Exception:
+                                pass
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         slot = tool_calls.setdefault(idx, {"id": None, "type": "function",
@@ -4056,6 +4063,7 @@ class Agent:
         self.oracle_model = oracle_model
         self._ctx_tokens = 0  # last model-call prompt_tokens, for the context-depth meter
         self.max_effort = max_effort
+        self._show_full = False  # --show-full: stream thinking live + show untruncated tool calls
         # OpenRouter's reasoning.effort enum tops out at "xhigh" — Anthropic's "max"
         # tier isn't exposed and is rejected by schema validation — so the main model always
         # runs at "xhigh". --max-effort pins the GPT-5.5 oracle to "high", its native
@@ -7161,10 +7169,25 @@ class Agent:
                     dbg = self._redact_debug_str(dbg)
                     print(f"[debug] Request: {dbg}", file=sys.stderr)
 
-                result = await post_completion(
-                    self.http, self.headers, payload, total_timeout=1800,
-                    on_progress=lambda nc: self.spinner.update(f"Thinking… {nc:,} chars streamed"),
-                )
+                if self._show_full:
+                    _th = {"on": False}
+                    def _stream_think(t):
+                        if not _th["on"]:
+                            _th["on"] = True
+                            sys.stderr.write("\n  💭 ")
+                        sys.stderr.write(t)
+                        sys.stderr.flush()
+                    result = await post_completion(
+                        self.http, self.headers, payload, total_timeout=1800,
+                        on_reasoning=_stream_think,
+                    )
+                    if _th["on"]:
+                        sys.stderr.write("\n")
+                else:
+                    result = await post_completion(
+                        self.http, self.headers, payload, total_timeout=1800,
+                        on_progress=lambda nc: self.spinner.update(f"Thinking… {nc:,} chars streamed"),
+                    )
                 status = result.get("_status")
                 if status == 429:
                     wait = int(result.get("_retry_after") or 5)
@@ -7282,11 +7305,16 @@ class Agent:
                     extra = f" (+{len(val) - 1} more)" if len(val) > 1 else ""
                     val = (str(val[0]) if val else "") + extra
                 s = str(val).strip()
-                for line in s.splitlines():
-                    if line.strip():
-                        s = line.strip()
-                        break
-                brief = (s[:69] + "…") if len(s) > 70 else s
+                if self._show_full:
+                    brief = " ".join(s.split())
+                    if len(brief) > 2000:
+                        brief = brief[:2000] + "…"
+                else:
+                    for line in s.splitlines():
+                        if line.strip():
+                            s = line.strip()
+                            break
+                    brief = (s[:69] + "…") if len(s) > 70 else s
                 break
             self.spinner.update(f"⚡ {name}" + (f" → {brief}" if brief else ""))
             self.events.emit("tool_start", name=name, args=brief)
@@ -7724,8 +7752,12 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
                     debug, verbose, headed=False, resume_id=None, worker_mode=False,
                     control_file=None, searxng_url=None, pipe_mode=False,
                     notify_desktop=False, notify_email=None, max_cost=None,
-                    tui_mode=False, max_effort=False):
+                    tui_mode=False, max_effort=False, show_full=False):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed, max_effort=max_effort)
+    agent._show_full = show_full
+    if show_full:
+        # No animated spinner in show-full mode — thinking is streamed live instead.
+        agent.spinner = Spinner(enabled=False)
 
     # Pipe mode: suppress all non-report output
     if pipe_mode:
@@ -8637,6 +8669,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None, metavar="THREAD_ID", help="Resume a previous thread, inheriting its saved config (model, oracle, max-loops, max-effort, cwd) unless overridden. Optionally combine with --prompt or positional text for fresh instructions")
     parser.add_argument("--headed", action="store_true", help="Show the browser window for visual debugging")
     parser.add_argument("--verbose", action="store_true", help="Verbose error traces")
+    parser.add_argument("--show-full", action="store_true", help="Stream the model's thinking live and show full, untruncated tool calls (disables the spinner; a verbose firehose for watching/debugging a run)")
     parser.add_argument("--debug", action="store_true", help="Debug-level API payload logging")
     parser.add_argument("--orchestrator", action="store_true", help="Launch orchestrator mode (manage multiple parallel agents)")
     parser.add_argument("--pipe", action="store_true", help="Pipe mode: final report to stdout, everything else suppressed")
@@ -8762,6 +8795,7 @@ def main():
             max_cost=getattr(args, 'max_cost', None),
             tui_mode=getattr(args, 'tui', False),
             max_effort=max_effort,
+            show_full=getattr(args, 'show_full', False),
         ))
     except KeyboardInterrupt:
         pass
