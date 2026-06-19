@@ -374,8 +374,14 @@ DTT_DIR         = Path.home() / ".dtt" / "threads"
 if "NOTTE_CONFIG_PATH" not in os.environ:
     _notte_config_path = BASE / "notte_dtt_config.toml"
     try:
-        _notte_config_path.write_text('browser_backend = "playwright"\n', encoding="utf-8")
+        _notte_config_path.write_text(
+            'browser_backend = "playwright"\n'
+            'reasoning_model = "openrouter/anthropic/claude-opus-4.8:online"\n'
+            'perception_model = "openrouter/google/gemini-3.5-flash"\n',
+            encoding="utf-8",
+        )
         os.environ["NOTTE_CONFIG_PATH"] = str(_notte_config_path)
+        os.environ.setdefault("ENABLE_OPENROUTER", "true")
     except Exception:
         pass
     finally:
@@ -857,6 +863,7 @@ class Browser:
         async with self._lock:
             if self._session is None:
                 import notte
+                _configure_redacted_loguru_logging()
                 self._session = notte.Session(
                     headless=self._headless,
                     browser_type="camoufox",
@@ -1226,11 +1233,21 @@ _SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE
 )
 _SENSITIVE_VALUE_RE = re.compile(
-    r'(sk-or-[a-zA-Z0-9\-_]{20,}|sk-[a-zA-Z0-9\-_]{20,}|Bearer\s+[A-Za-z0-9\-_.]+)',
+    r'(sk-or-[a-zA-Z0-9\-_]{20,}|sk-[a-zA-Z0-9\-_]{20,}|AIza[0-9A-Za-z\-_]{20,}|Bearer\s+[A-Za-z0-9\-_.]+)',
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r'([?&](?:api[_-]?key|key|token|access[_-]?token|auth|authorization)=)[^&\s\'"]+',
+    re.IGNORECASE,
 )
 
 def _collect_secret_values():
     secrets = set()
+    for env_key, val in os.environ.items():
+        if not val or len(val) <= 8:
+            continue
+        if not _SENSITIVE_KEY_RE.search(env_key):
+            continue
+        secrets.add(val)
     for env_key in ("OPENROUTER_API_KEY", "SERPER_API_KEY", "TWOCAPTCHA_API_KEY", "AGENTMAIL_API_KEY"):
         val = os.environ.get(env_key, "")
         if val and len(val) > 8:
@@ -1249,6 +1266,7 @@ def _redact_secrets_in_str(text, secret_values=None):
         lambda m: m.group(0)[:6] + "..." + m.group(0)[-4:] if len(m.group(0)) > 12 else "****",
         text
     )
+    text = _SENSITIVE_QUERY_RE.sub(lambda m: m.group(1) + "[REDACTED]", text)
     return text
 
 def _redact_value(key, val):
@@ -1272,6 +1290,31 @@ def _redact_for_log(obj, secret_values=None):
     elif isinstance(obj, str):
         return _redact_secrets_in_str(obj, secret_values)
     return obj
+
+def _configure_redacted_loguru_logging():
+    """Route Notte/LiteLLM loguru output through DTT's secret redactor."""
+    try:
+        from loguru import logger as loguru_logger
+    except Exception:
+        return
+
+    def _sink(message):
+        try:
+            text = _redact_secrets_in_str(str(message), _collect_secret_values())
+            sys.stderr.write(text)
+        except Exception:
+            sys.stderr.write(str(message))
+
+    try:
+        loguru_logger.configure(
+            handlers=[{
+                "sink": _sink,
+                "level": "INFO",
+                "format": "<level>{level: <8}</level> - <level>{message}</level>",
+            }]
+        )
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -5702,6 +5745,7 @@ class Agent:
 
         def _run():
             import notte
+            _configure_redacted_loguru_logging()
             with notte.Session(
                 headless=not headed,
                 browser_type="camoufox",
@@ -5716,7 +5760,7 @@ class Agent:
                         return f"Error navigating to {url}: {nav.message}"
                 agent = notte.Agent(
                     session=session,
-                    reasoning_model="openrouter/anthropic/claude-sonnet-4.6",
+                    reasoning_model="openrouter/anthropic/claude-opus-4.8:online",
                     max_steps=max_steps,
                 )
                 response = agent.run(task=task)
