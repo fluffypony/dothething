@@ -122,7 +122,7 @@ All calls route through OpenRouter. You only need one API key.
 |---|---|---|
 | Main agent | Claude Opus 4.8 | `--fast` for Opus 4.8-fast |
 | Summarizer, analysis, delegate | Google Gemini 3.5 Flash | -- |
-| Browser agent (Notte) | Claude Opus 4.8 | -- |
+| Browser agent (Notte) | Claude Sonnet 4.6 | -- |
 | Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro |
 
 ## Tools

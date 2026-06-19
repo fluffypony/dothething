@@ -667,7 +667,7 @@
                             <li><strong>Result Mode</strong>
                             Every tool call includes a <code>result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Gemini 3.5 Flash) for focused summary, preserving context window.</li>
                             <li><strong>Browser Automation</strong>
-                            Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to an Opus-powered browser agent.</li>
+                            Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to a Sonnet-powered browser agent.</li>
                             <li><strong>Orchestrator Mode</strong>
                             <code>--orchestrator</code> opens a Textual terminal UI for running multiple agents in parallel. One line per session showing status, phase, elapsed time, and cost. Expand any session to watch its log, send input, terminate, or copy output. A smart launcher takes your prompt, has Opus split the work, and spins up to 16 concurrent agents. Shows a cost estimate before launch.</li>
                             <li><strong>Live Input</strong>
