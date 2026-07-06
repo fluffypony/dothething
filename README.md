@@ -62,7 +62,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 | `--cwd DIR` | Set the working directory for file operations (default: `.`) |
 | `--max-loops N` | Cap the number of agent turns (default: 200) |
 | `--oraclepro` | Use GPT-5.5-pro instead of GPT-5.5 for oracle calls |
-| `--max-effort` | Pin the GPT-5.5 oracle to `high` reasoning effort, its native ceiling (Opus always runs at `xhigh`, the highest OpenRouter accepts) |
+| `--max-effort` | Pin the GPT-5.5 oracle to `high` reasoning effort, its native ceiling (Fable always runs at `xhigh`, the highest OpenRouter accepts) |
 | `--resume ID` | Pick up a previous session by thread ID. Inherits that thread's saved config (model, oracle, `--max-loops`, `--max-effort`, `--cwd`); pass a flag to override it |
 | `--headed` | Show the browser window for visual debugging |
 | `--orchestrator` | Launch orchestrator mode -- run and manage multiple agents from one terminal |
@@ -76,7 +76,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 
 ## How it works
 
-The agent routes Claude Opus through OpenRouter. Every turn, the model decides which tools to call, processes the results, and decides what to do next.
+The agent routes Claude Fable through OpenRouter. Every turn, the model decides which tools to call, processes the results, and decides what to do next.
 
 **result_mode.** Every tool call has a `result_mode`. If you need exact output, use `"raw"`. If you tell it to "extract all function signatures", it pipes the output through Gemini 3.5 Flash for a tight summary before the main agent sees it. This keeps the context window manageable on long tasks.
 
@@ -98,7 +98,7 @@ The agent routes Claude Opus through OpenRouter. Every turn, the model decides w
 - Expand any session to watch its log in real time
 - Send live input or queued input to a running agent
 - Terminate, copy logs, or copy final output to your clipboard
-- A "smart launcher" that sends your prompt to Opus, which figures out how to split the work and spins up agents for each piece
+- A "smart launcher" that sends your prompt to Fable, which figures out how to split the work and spins up agents for each piece
 
 The smart launcher caps at 16 concurrent agents by default and shows a cost estimate before launching.
 
@@ -120,7 +120,7 @@ All calls route through OpenRouter. You only need one API key.
 
 | Role | Default model | Flag to change |
 |---|---|---|
-| Main agent | Claude Opus 4.8 | `--fast` for Opus 4.8-fast |
+| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast |
 | Summarizer, analysis, delegate | Google Gemini 3.5 Flash | -- |
 | Browser agent (Notte) | Claude Sonnet 4.6 | -- |
 | Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro |

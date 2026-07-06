@@ -110,13 +110,13 @@ Usage:
            [--notify-email EMAIL] [--max-cost USD]
 
 Flags:
-  --fast          Use anthropic/claude-opus-4.8-fast:online instead of opus 4.8
+  --fast          Use anthropic/claude-opus-4.8-fast:online instead of fable 5
   --prompt "..."  Provide task inline (otherwise opens multiline editor)
   --cwd DIR       Working directory for relative paths (default: .)
   --max-loops N   Maximum agent loop iterations (default: 200)
   --oraclepro     Use openai/gpt-5.5-pro for oracle (default: openai/gpt-5.5)
   --max-effort    Pin the GPT-5.5 oracle to 'high' reasoning effort, its native
-                  ceiling (Opus always runs at 'xhigh', OpenRouter's maximum)
+                  ceiling (Fable always runs at 'xhigh', OpenRouter's maximum)
   --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/).
                   Combine with --prompt or positional text, or just let the
                   editor open, to supply fresh instructions on resume.
@@ -391,8 +391,11 @@ if "NOTTE_CONFIG_PATH" not in os.environ:
 
 OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
-OPUS            = "anthropic/claude-opus-4.8:online"
-OPUS_FAST       = "anthropic/claude-opus-4.8-fast:online"
+# NB: no ":online" suffix. OpenRouter's web plugin errors out on large agentic
+# contexts (~60k+ tokens), returning an empty error that looks like "won't use
+# tools." The agent has native search_web/fetch_page tools, so it's redundant here.
+FABLE           = "anthropic/claude-fable-5"
+OPUS_FAST       = "anthropic/claude-opus-4.8-fast"
 # Secondary "worker" model: result-mode summarization, delegation, image/data
 # analysis, batch processing, and context compaction. The browser agent uses its
 # own model (see browser_agent) — this constant does not drive it.
@@ -1211,7 +1214,7 @@ class CostTracker:
         self._http = http_client
         self._task = asyncio.create_task(self._worker())
 
-    async def track(self, response_id, label="opus"):
+    async def track(self, response_id, label="fable"):
         if response_id and response_id not in self._accounted:
             await self._queue.put((response_id, label, time.time(), 0))
 
@@ -4225,7 +4228,7 @@ class Agent:
         self.max_effort = max_effort
         self._show_full = False  # --show-full: stream thinking live + show untruncated tool calls
         # OpenRouter's reasoning.effort enum tops out at "xhigh" — Anthropic's "max"
-        # tier isn't exposed and is rejected by schema validation — so the main model always
+        # tier isn't exposed and is rejected by schema validation — so Fable always
         # runs at "xhigh". --max-effort pins the GPT-5.5 oracle to "high", its native
         # ceiling, instead of relying on OpenRouter's normalization of "xhigh".
         self._model_effort = "xhigh"
@@ -7445,11 +7448,11 @@ class Agent:
                     else:
                         rid = result.get("id")
                         if rid:
-                            await self.cost_tracker.track(rid, "opus")
+                            await self.cost_tracker.track(rid, "fable")
                 else:
                     rid = result.get("id")
                     if rid:
-                        await self.cost_tracker.track(rid, "opus")
+                        await self.cost_tracker.track(rid, "fable")
 
                 if "error" in result:
                     err = result["error"]
@@ -7465,7 +7468,7 @@ class Agent:
                         )
                         rid2 = result.get("id")
                         if rid2:
-                            await self.cost_tracker.track(rid2, "opus")
+                            await self.cost_tracker.track(rid2, "fable")
                         if "error" not in result:
                             return result
                     self.events.emit("error", message=f"API error: {msg}")
@@ -8802,7 +8805,7 @@ class OrchestratorApp:
 
                             data = await post_completion(
                                 client, _make_headers(orchestrator.api_key), {
-                                    "model": OPUS,
+                                    "model": FABLE,
                                     "messages": messages,
                                     "tools": ORCHESTRATOR_TOOLS,
                                     "tool_choice": "auto",
@@ -8924,7 +8927,7 @@ def main():
     )
     parser.add_argument("--fast", action="store_true", help="Use claude-opus-4.8-fast:online")
     parser.add_argument("--oraclepro", action="store_true", help="Use gpt-5.5-pro for oracle (default: gpt-5.5)")
-    parser.add_argument("--max-effort", action="store_true", help="Pin the GPT-5.5 oracle to 'high' reasoning effort, its native ceiling (Opus always runs at 'xhigh', OpenRouter's maximum)")
+    parser.add_argument("--max-effort", action="store_true", help="Pin the GPT-5.5 oracle to 'high' reasoning effort, its native ceiling (Fable always runs at 'xhigh', OpenRouter's maximum)")
     parser.add_argument("--prompt", type=str, default=None, help="Inline prompt text")
     parser.add_argument("--cwd", type=str, default=".", help="Working directory for relative paths")
     parser.add_argument("--max-loops", type=int, default=MAX_LOOPS, help=f"Maximum agent loops (default: {MAX_LOOPS})")
@@ -8953,7 +8956,7 @@ def main():
         print("Error: OPENROUTER_API_KEY environment variable not set.", file=sys.stderr)
         sys.exit(1)
 
-    model = OPUS_FAST if args.fast else OPUS
+    model = OPUS_FAST if args.fast else FABLE
     oracle_model = ORACLE_PRO if args.oraclepro else ORACLE_DEFAULT
     cwd = str(Path(args.cwd).expanduser().resolve())
     max_loops = args.max_loops

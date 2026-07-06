@@ -2,7 +2,7 @@
 <meta charset="UTF-8" vid="2">
 <meta name="viewport" content="width=device-width, initial-scale=1.0" vid="3">
 <title vid="4">dothething (DTT) - The Autonomous AI Agent that Gets It Done</title>
-<meta name="description" content="An autonomous AI agent that runs locally, thinks for itself, and gets stuff done. Give it a task, walk away, come back to results. Powered by Claude Opus 4.8 with GPT-5.5 oracle.">
+<meta name="description" content="An autonomous AI agent that runs locally, thinks for itself, and gets stuff done. Give it a task, walk away, come back to results. Powered by Claude Fable 5 with GPT-5.5 oracle.">
 
 <!-- Open Graph -->
 <meta property="og:type" content="website">
@@ -12,7 +12,7 @@
 <meta property="og:image" content="https://dotheth.ing/og_image.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="dothething - autonomous AI agent powered by Claude Opus 4.8 with GPT-5.5 oracle">
+<meta property="og:image:alt" content="dothething - autonomous AI agent powered by Claude Fable 5 with GPT-5.5 oracle">
 <meta property="og:site_name" content="dothething">
 
 <!-- Twitter Card -->
@@ -20,7 +20,7 @@
 <meta name="twitter:title" content="dothething - The Autonomous AI Agent that Gets It Done">
 <meta name="twitter:description" content="An autonomous AI agent that runs locally, thinks for itself, and gets stuff done. Give it a task, walk away, come back to results.">
 <meta name="twitter:image" content="https://dotheth.ing/og_image.jpg">
-<meta name="twitter:image:alt" content="dothething - autonomous AI agent powered by Claude Opus 4.8 with GPT-5.5 oracle">
+<meta name="twitter:image:alt" content="dothething - autonomous AI agent powered by Claude Fable 5 with GPT-5.5 oracle">
 
 <!-- Structured Data -->
 <script type="application/ld+json">
@@ -576,7 +576,7 @@
                     <div class="visual-col" vid="39">
                         <div class="visual-meta" vid="40">
                             Main Agent<br vid="41">
-                            <strong vid="42">Claude Opus 4.8</strong>
+                            <strong vid="42">Claude Fable 5</strong>
                             executes core logic and tools
                         </div>
                         <div class="orb-stack" vid="43">
@@ -669,7 +669,7 @@
                             <li><strong>Browser Automation</strong>
                             Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to a Sonnet-powered browser agent.</li>
                             <li><strong>Orchestrator Mode</strong>
-                            <code>--orchestrator</code> opens a Textual terminal UI for running multiple agents in parallel. One line per session showing status, phase, elapsed time, and cost. Expand any session to watch its log, send input, terminate, or copy output. A smart launcher takes your prompt, has Opus split the work, and spins up to 16 concurrent agents. Shows a cost estimate before launch.</li>
+                            <code>--orchestrator</code> opens a Textual terminal UI for running multiple agents in parallel. One line per session showing status, phase, elapsed time, and cost. Expand any session to watch its log, send input, terminate, or copy output. A smart launcher takes your prompt, has Fable split the work, and spins up to 16 concurrent agents. Shows a cost estimate before launch.</li>
                             <li><strong>Live Input</strong>
                             Press any key while the agent runs to open an input bar. Enter injects your message immediately, Ctrl-Q queues it for after the current step, Esc cancels. The agent can also ask you questions: OTP codes, preferences, confirmation before destructive actions.</li>
                             <li><strong>Email</strong>
@@ -770,7 +770,7 @@
                         <tr vid="147"><td class="col-key" vid="148">--prompt</td><td class="col-val" vid="149">Initial task description.</td></tr>
                         <tr vid="150"><td class="col-key" vid="151">--fast</td><td class="col-val" vid="152">Swaps to Opus 4.8-fast.</td></tr>
                         <tr vid="153"><td class="col-key" vid="154">--oraclepro</td><td class="col-val" vid="155">Upgrades oracle to GPT-5.5-pro.</td></tr>
-                        <tr><td class="col-key">--max-effort</td><td class="col-val">Pin oracle effort to high, its native ceiling (Opus always xhigh).</td></tr>
+                        <tr><td class="col-key">--max-effort</td><td class="col-val">Pin oracle effort to high, its native ceiling (Fable always xhigh).</td></tr>
                         <tr vid="156"><td class="col-key" vid="157">--cwd DIR</td><td class="col-val" vid="158">Set working directory.</td></tr>
                         <tr vid="159"><td class="col-key" vid="160">--resume ID</td><td class="col-val" vid="161">Load thread from ~/.dtt/threads/</td></tr>
                         <tr vid="162"><td class="col-key" vid="163">--max-loops N</td><td class="col-val" vid="164">Limit iteration cycles.</td></tr>
