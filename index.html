@@ -666,6 +666,8 @@
                             Describe task in plain language → agent drafts numbered plan → executes autonomously → searches web, reads/writes files, runs shell commands → delivers final output.</li>
                             <li><strong>Result Mode</strong>
                             Every tool call includes a <code>result_mode</code>. "raw" delivers exact output; "goal" string pipes output through a cheaper model (Gemini 3.5 Flash) for focused summary, preserving context window.</li>
+                            <li><strong>Stacked Tool Calls</strong>
+                            Many tool calls per reply, all parallel by default. An optional <code>exec_order</code> field sequences them into stages: calls sharing a number run together, and the next stage waits for the previous one to finish. "Make a directory, write three files into it, list it" is one round-trip instead of three. If a whole stage fails, everything after it is skipped.</li>
                             <li><strong>Browser Automation</strong>
                             Notte + Camoufox (stealth Firefox) under the hood. <code>fetch_page</code> pulls clean markdown, no LLM cost. Captchas get solved in the background. For login flows or multi-step SPAs, <code>browser_agent</code> hands the session off to a Sonnet-powered browser agent.</li>
                             <li><strong>Orchestrator Mode</strong>
@@ -678,6 +680,8 @@
                     </div>
                     <div class="col-6">
                         <ul class="feature-list">
+                            <li><strong>Quick Mode</strong>
+                            <code>dtt q "what's the weather in Cape Town"</code> for small tasks. Runs Opus 4.8-fast with a trimmed toolset (no oracle, no planning bookkeeping) and aims to finish in two turns: one reply carrying every tool call the job needs, staged with <code>exec_order</code>, then the answer. Loop cap drops to 15.</li>
                             <li><strong>Thread Persistence</strong>
                             Sessions save to <code>~/.dtt/threads/</code> with timestamped IDs. Pick up where you left off with <code>--resume &lt;id&gt;</code>. Full cost breakdown prints on exit: tokens, cache hits, dollars.</li>
                             <li><strong>Prompt Caching</strong>
@@ -768,6 +772,7 @@
                 <table class="data-table" vid="145">
                     <tbody vid="146">
                         <tr vid="147"><td class="col-key" vid="148">--prompt</td><td class="col-val" vid="149">Initial task description.</td></tr>
+                        <tr><td class="col-key">q / --quick</td><td class="col-val">Quick mode: one-shot on Opus 4.8-fast, stacked tool calls, no oracle.</td></tr>
                         <tr vid="150"><td class="col-key" vid="151">--fast</td><td class="col-val" vid="152">Swaps to Opus 4.8-fast.</td></tr>
                         <tr vid="153"><td class="col-key" vid="154">--oraclepro</td><td class="col-val" vid="155">Upgrades oracle to GPT-5.5-pro.</td></tr>
                         <tr><td class="col-key">--max-effort</td><td class="col-val">Pin oracle effort to high, its native ceiling (Fable always xhigh).</td></tr>

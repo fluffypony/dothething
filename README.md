@@ -38,6 +38,17 @@ The first run also takes a couple of minutes to set up a Python venv, install Se
 
 Omit `--prompt` to open a multiline editor. Type your task, then hit Esc+Enter to submit.
 
+## Quick mode
+
+For small tasks where you want an answer in seconds, not a research project, put `q` in front of your prompt:
+
+```bash
+dtt q "what's the weather like in Cape Town today"
+dtt q "create an SSH key for me and copy it to clipboard"
+```
+
+Quick mode runs on Opus 4.8-fast at reduced reasoning effort, with a trimmed toolset: no oracle, no plan or notes bookkeeping, no batch machinery, and skills stay out of the prompt until invoked. The prompt pushes it to one-shot the task. Its first reply stacks every tool call the job needs, staged with `exec_order` where order matters, and the next reply is the answer. The loop cap drops to 15 turns. `-q` and `--quick` do the same thing as the `q` prefix.
+
 ## Requirements
 
 - macOS or Linux
@@ -57,10 +68,11 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 
 | Flag | What it does |
 |---|---|
+| `q` (or `-q`, `--quick`) | Quick mode: one-shot the task on Opus 4.8-fast with a trimmed toolset and no oracle |
 | `--prompt "..."` | Provide the task inline instead of opening the editor |
 | `--fast` | Use claude-opus-4.8-fast:online (cheaper, slightly less capable) |
 | `--cwd DIR` | Set the working directory for file operations (default: `.`) |
-| `--max-loops N` | Cap the number of agent turns (default: 200) |
+| `--max-loops N` | Cap the number of agent turns (default: 200; 15 in quick mode) |
 | `--oraclepro` | Use GPT-5.5-pro instead of GPT-5.5 for oracle calls |
 | `--max-effort` | Pin the GPT-5.5 oracle to `high` reasoning effort, its native ceiling (Fable always runs at `xhigh`, the highest OpenRouter accepts) |
 | `--resume ID` | Pick up a previous session by thread ID. Inherits that thread's saved config (model, oracle, `--max-loops`, `--max-effort`, `--cwd`); pass a flag to override it |
@@ -79,6 +91,8 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 The agent routes Claude Fable through OpenRouter. Every turn, the model decides which tools to call, processes the results, and decides what to do next.
 
 **result_mode.** Every tool call has a `result_mode`. If you need exact output, use `"raw"`. If you tell it to "extract all function signatures", it pipes the output through Gemini 3.5 Flash for a tight summary before the main agent sees it. This keeps the context window manageable on long tasks.
+
+**Stacked tool calls with exec_order.** The agent can return many tool calls in a single reply. By default they all run in parallel. An optional `exec_order` field on each call sequences them into stages: calls sharing a stage number run concurrently, and the next stage starts once the previous one finishes. Seven calls staged `1,1,2,3,3,3,4` run as two in parallel, then one, then three in parallel, then one. If every call in a stage fails, the later stages are skipped so the agent can correct course. "Make a directory, write three files into it, list the result" completes in one round-trip instead of three.
 
 **Browser automation.** We use Notte with Camoufox under the hood. For simple scraping, `fetch_page` grabs clean markdown with no LLM cost. If a captcha shows up, it gets solved automatically. For complex multi-step interactions (login flows, forms, SPAs), the agent can hand off the session to a dedicated Notte browser agent via `browser_agent`.
 
@@ -120,10 +134,10 @@ All calls route through OpenRouter. You only need one API key.
 
 | Role | Default model | Flag to change |
 |---|---|---|
-| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast |
+| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast; quick mode (`q`) always uses Opus 4.8-fast |
 | Summarizer, analysis, delegate | Google Gemini 3.5 Flash | -- |
 | Browser agent (Notte) | Claude Sonnet 4.6 | -- |
-| Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro |
+| Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro (not exposed in quick mode) |
 
 ## Tools
 
