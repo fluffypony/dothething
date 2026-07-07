@@ -74,6 +74,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 | `--cwd DIR` | Set the working directory for file operations (default: `.`) |
 | `--max-loops N` | Cap the number of agent turns (default: 200; 15 in quick mode) |
 | `--oraclepro` | Use GPT-5.5-pro instead of GPT-5.5 for oracle calls |
+| `--model [ROLE=]SLUG` | Override the model for a role: `main`, `worker`, `oracle`, or `browser`. Repeatable. A bare slug targets `main`; `ROLE=default` clears a saved or env override |
 | `--max-effort` | Pin the GPT-5.5 oracle to `high` reasoning effort, its native ceiling (Fable always runs at `xhigh`, the highest OpenRouter accepts) |
 | `--resume ID` | Pick up a previous session by thread ID. Inherits that thread's saved config (model, oracle, `--max-loops`, `--max-effort`, `--cwd`); pass a flag to override it |
 | `--headed` | Show the browser window for visual debugging |
@@ -134,10 +135,23 @@ All calls route through OpenRouter. You only need one API key.
 
 | Role | Default model | Flag to change |
 |---|---|---|
-| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast; quick mode (`q`) uses Opus 4.8, or Opus 4.8-fast with `--fast` |
-| Summarizer, analysis, delegate | Google Gemini 3.5 Flash | -- |
-| Browser agent (Notte) | Claude Sonnet 4.6 | -- |
-| Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro (not exposed in quick mode) |
+| Main agent (`main`) | Claude Fable 5 | `--fast` for Opus 4.8-fast; quick mode (`q`) uses Opus 4.8, or Opus 4.8-fast with `--fast` |
+| Summarizer, analysis, delegate (`worker`) | Google Gemini 3.5 Flash | `--model worker=...` |
+| Browser agent, Notte (`browser`) | Claude Sonnet 4.6 | `--model browser=...` |
+| Oracle (`oracle`) | GPT-5.5 | `--oraclepro` for GPT-5.5-pro (not exposed in quick mode) |
+
+### Model overrides
+
+Any of the four roles can be swapped for a different OpenRouter model with `--model`:
+
+```bash
+dtt --model oracle=x-ai/grok-5 --prompt "..."                # different oracle
+dtt --model worker=google/gemini-3.5-flash-lite "..."        # cheaper worker
+dtt --model anthropic/claude-sonnet-4.6 "..."                # bare slug targets main
+dtt --model main=openai/gpt-5.5 --model oracle=anthropic/claude-fable-5 "..."
+```
+
+`--model` beats the `q`/`--fast`/`--oraclepro` defaults. A resumed thread keeps its overrides unless you pass new ones, and `--model oracle=default` clears one. To make an override permanent, set `DTT_MODEL_MAIN`, `DTT_MODEL_WORKER`, `DTT_MODEL_ORACLE`, or `DTT_MODEL_BROWSER` in `~/.dtt/env`; CLI flags win over env vars. Orchestrator workers inherit whatever overrides are in effect.
 
 ## Tools
 
@@ -198,6 +212,10 @@ The agent discovers and uses all tools exposed by connected MCP servers.
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | Yes | Your OpenRouter API key |
+| `DTT_MODEL_MAIN` | No | Default model override for the main agent |
+| `DTT_MODEL_WORKER` | No | Default model override for the worker (summaries, delegation, batch) |
+| `DTT_MODEL_ORACLE` | No | Default model override for the oracle |
+| `DTT_MODEL_BROWSER` | No | Default model override for the Notte browser agent |
 | `SERPER_API_KEY` | No | Enables hybrid `search_web` plus Serper-backed `batch_process` search enrichment |
 | `TWOCAPTCHA_API_KEY` | No | Enables automated captcha solving |
 | `AGENTMAIL_API_KEY` | No | AgentMail key for email tools |

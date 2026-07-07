@@ -104,7 +104,8 @@ dothething — autonomous AI agent | https://dotheth.ing
 
 Usage:
   ./dtt.sh [q] [--fast] [--prompt "..."] [--cwd DIR] [--max-loops N]
-           [--oraclepro] [--max-effort] [--headed] [--orchestrator]
+           [--oraclepro] [--max-effort] [--model [ROLE=]SLUG]
+           [--headed] [--orchestrator]
            [--verbose] [--debug] [--keep-temp] [--resume THREAD_ID]
            [--version] [--update] [--pipe] [--tui] [--notify-desktop]
            [--notify-email EMAIL] [--max-cost USD]
@@ -126,6 +127,16 @@ Flags:
   --oraclepro     Use openai/gpt-5.5-pro for oracle (default: openai/gpt-5.5)
   --max-effort    Pin the GPT-5.5 oracle to 'high' reasoning effort, its native
                   ceiling (Fable always runs at 'xhigh', OpenRouter's maximum)
+  --model [ROLE=]SLUG
+                  Override the model for one role; repeat for several. Roles:
+                  main (the agent), worker (summaries/delegation/batch),
+                  oracle (second opinions), browser (Notte browser agent).
+                  A bare slug targets main. ROLE=default clears a saved or
+                  env override. Wins over q/--fast/--oraclepro. Persists
+                  across --resume. Env equivalents: DTT_MODEL_MAIN,
+                  DTT_MODEL_WORKER, DTT_MODEL_ORACLE, DTT_MODEL_BROWSER
+                  (put them in ~/.dtt/env to make an override permanent).
+                  Example: --model oracle=x-ai/grok-5 --model worker=google/gemini-3.5-flash-lite
   --resume ID     Resume a previous thread by ID (from ~/.dtt/threads/).
                   Combine with --prompt or positional text, or just let the
                   editor open, to supply fresh instructions on resume.
@@ -149,6 +160,10 @@ Flags:
 
 Environment:
   OPENROUTER_API_KEY     Required. Your OpenRouter API key.
+  DTT_MODEL_MAIN         Optional. Default model override for the main agent.
+  DTT_MODEL_WORKER       Optional. Same for the worker (summaries, delegation, batch).
+  DTT_MODEL_ORACLE       Optional. Same for the oracle.
+  DTT_MODEL_BROWSER      Optional. Same for the Notte browser agent.
   SERPER_API_KEY         Optional. Uses Serper for hybrid general search and batch_process enrichment.
   TWOCAPTCHA_API_KEY     Optional. Enables automated captcha solving.
   AGENTMAIL_API_KEY      Optional. AgentMail key for email tools.
@@ -377,26 +392,42 @@ DTT_CACHE       = Path.home() / ".dtt" / "cache"
 VENV            = DTT_CACHE / "venv"
 DTT_DIR         = Path.home() / ".dtt" / "threads"
 
-# DTT always drives Notte through Camoufox. Camoufox returns Playwright
-# objects, so force Notte's backend aliases to Playwright before any Notte
-# modules are imported.
-if "NOTTE_CONFIG_PATH" not in os.environ:
-    _notte_config_path = BASE / "notte_dtt_config.toml"
+# Browser-agent (Notte) model. Overridable via DTT_MODEL_BROWSER or
+# --model browser=<slug>; the env var must be read here because the Notte
+# config below is written at import time, before CLI parsing.
+BROWSER_AGENT_MODEL_DEFAULT = "anthropic/claude-sonnet-4.6"
+BROWSER_AGENT_MODEL = os.environ.get("DTT_MODEL_BROWSER") or BROWSER_AGENT_MODEL_DEFAULT
+
+
+def _write_notte_config(path=None):
+    """Write DTT's Notte config TOML using the current BROWSER_AGENT_MODEL and
+    point NOTTE_CONFIG_PATH at it. Returns True on success. Refuses to touch a
+    NOTTE_CONFIG_PATH the user set themselves (anything outside BASE)."""
+    current = os.environ.get("NOTTE_CONFIG_PATH")
+    if current and not current.startswith(str(BASE)):
+        return False
+    target = Path(path) if path else BASE / "notte_dtt_config.toml"
     try:
-        _notte_config_path.write_text(
+        target.write_text(
             'browser_backend = "playwright"\n'
-            'reasoning_model = "openrouter/anthropic/claude-sonnet-4.6"\n'
+            f'reasoning_model = "openrouter/{BROWSER_AGENT_MODEL}"\n'
             'perception_model = "openrouter/google/gemini-3.5-flash"\n'
             'timeout_default_ms = 15000\n'
             'timeout_action_ms = 20000\n',
             encoding="utf-8",
         )
-        os.environ["NOTTE_CONFIG_PATH"] = str(_notte_config_path)
+        os.environ["NOTTE_CONFIG_PATH"] = str(target)
         os.environ.setdefault("ENABLE_OPENROUTER", "true")
+        return True
     except Exception:
-        pass
-    finally:
-        del _notte_config_path
+        return False
+
+
+# DTT always drives Notte through Camoufox. Camoufox returns Playwright
+# objects, so force Notte's backend aliases to Playwright before any Notte
+# modules are imported.
+if "NOTTE_CONFIG_PATH" not in os.environ:
+    _write_notte_config()
 
 OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
@@ -411,13 +442,44 @@ OPUS_FAST       = "anthropic/claude-opus-4.8-fast"
 # Secondary "worker" model: result-mode summarization, delegation, image/data
 # analysis, batch processing, and context compaction. The browser agent uses its
 # own model (see browser_agent) — this constant does not drive it.
-WORKER          = "google/gemini-3.5-flash"
+WORKER_DEFAULT  = "google/gemini-3.5-flash"
+WORKER          = os.environ.get("DTT_MODEL_WORKER") or WORKER_DEFAULT
 ORACLE_DEFAULT  = "openai/gpt-5.5:online"
 ORACLE_PRO      = "openai/gpt-5.5-pro:online"
+# Roles accepted by --model ROLE=SLUG and the DTT_MODEL_<ROLE> env vars:
+#   main    — the agent itself (default: Fable; Opus in quick mode; -fast with --fast)
+#   worker  — summarization, delegation, analysis, batch, compaction (default: Gemini 3.5 Flash)
+#   oracle  — second opinions (default: GPT-5.5; GPT-5.5-pro with --oraclepro)
+#   browser — the Notte browser agent (default: Sonnet 4.6)
+MODEL_ROLES     = ("main", "worker", "oracle", "browser")
 MAX_LOOPS       = 200
 # Quick mode aims to one-shot in 2-3 turns; the cap is a safety net for error
 # recovery, not a work budget.
 QUICK_MAX_LOOPS = 15
+
+
+def _parse_model_overrides(pairs):
+    """Parse --model [ROLE=]SLUG flags into {role: slug}. A bare slug targets
+    main. Exits with an error on an unknown role — a typo here would silently
+    run the wrong model otherwise."""
+    overrides = {}
+    for raw in pairs or []:
+        raw = str(raw).strip()
+        if "=" in raw:
+            role, _, slug = raw.partition("=")
+            role = role.strip().lower()
+            slug = slug.strip()
+        else:
+            role, slug = "main", raw
+        if role not in MODEL_ROLES:
+            print(f"Error: unknown --model role '{role}'. Valid roles: "
+                  f"{', '.join(MODEL_ROLES)}.", file=sys.stderr)
+            sys.exit(1)
+        if not slug:
+            print(f"Error: --model {role}= needs a model slug (or 'default' to clear).", file=sys.stderr)
+            sys.exit(1)
+        overrides[role] = slug
+    return overrides
 # Usable context for history before the model starts losing room to answer:
 # the 1M window minus ~128k reserved for the response. Shown as "ctx %" per turn.
 CONTEXT_USABLE_TOKENS = 1_000_000 - 128_000
@@ -2688,8 +2750,11 @@ TOOLS = [
                     },
                     "time_range": {
                         "type": "string",
-                        "enum": ["day", "week", "month", "year", ""],
-                        "description": "Limit results to time range (default: no limit)",
+                        # No empty-string member: Google's API rejects empty
+                        # enum values (breaks --model overrides to Gemini).
+                        # Omitting the param already means "no limit".
+                        "enum": ["day", "week", "month", "year"],
+                        "description": "Limit results to time range (omit for no limit)",
                     },
                     "engines": {
                         "type": "string",
@@ -4420,6 +4485,9 @@ class Agent:
         self._ctx_tokens = 0  # last model-call prompt_tokens, for the context-depth meter
         self.max_effort = max_effort
         self.quick = quick
+        # Effective per-role model overrides (set by run_agent; persisted in
+        # thread meta so --resume reproduces them).
+        self._model_overrides = {}
         # Quick mode exposes a lean toolset (see QUICK_EXCLUDED_TOOLS).
         self._tools = QUICK_TOOLS if quick else TOOLS
         self._show_full = False  # --show-full: stream thinking live + show untruncated tool calls
@@ -6060,7 +6128,7 @@ class Agent:
                         return f"Error navigating to {url}: {nav.message}"
                 agent = notte.Agent(
                     session=session,
-                    reasoning_model="openrouter/anthropic/claude-sonnet-4.6",
+                    reasoning_model=f"openrouter/{BROWSER_AGENT_MODEL}",
                     max_steps=max_steps,
                 )
                 response = agent.run(task=task)
@@ -7085,6 +7153,7 @@ class Agent:
                 existing_meta["max_loops"] = max_loops
                 existing_meta["max_effort"] = self.max_effort
                 existing_meta["quick"] = self.quick
+                existing_meta["model_overrides"] = self._model_overrides
                 existing_meta.setdefault("thread_id", thread_id)
                 existing_meta["resumed_at"] = now.isoformat()
                 fresh = (prompt or "").strip()
@@ -7102,6 +7171,7 @@ class Agent:
                     "max_loops": max_loops,
                     "max_effort": self.max_effort,
                     "quick": self.quick,
+                    "model_overrides": self._model_overrides,
                     "prompt": prompt,
                     "started_at": now.isoformat(),
                     "thread_id": thread_id,
@@ -8286,8 +8356,10 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
                     debug, verbose, headed=False, resume_id=None, worker_mode=False,
                     control_file=None, searxng_url=None, pipe_mode=False,
                     notify_desktop=False, notify_email=None, max_cost=None,
-                    tui_mode=False, max_effort=False, show_full=False, quick=False):
+                    tui_mode=False, max_effort=False, show_full=False, quick=False,
+                    model_overrides=None):
     agent = Agent(model, oracle_model, api_key, cwd, debug=debug, verbose=verbose, headed=headed, max_effort=max_effort, quick=quick)
+    agent._model_overrides = dict(model_overrides or {})
     agent._show_full = show_full
     if show_full:
         # No animated spinner in show-full mode — thinking is streamed live instead.
@@ -8371,11 +8443,18 @@ async def run_agent(prompt, model, oracle_model, api_key, cwd, max_loops,
     try:
         await agent.setup()
         if not pipe_mode:
-            print(f"  ✓ Model: {model}" + (" (quick mode)" if quick else ""), file=sys.stderr)
+            ov = model_overrides or {}
+            print(f"  ✓ Model: {model}" + (" (quick mode)" if quick else "")
+                  + (" [override]" if "main" in ov else ""), file=sys.stderr)
             if quick:
                 print(f"  ✓ Oracle: disabled in quick mode", file=sys.stderr)
             else:
-                print(f"  ✓ Oracle: {oracle_model}", file=sys.stderr)
+                print(f"  ✓ Oracle: {oracle_model}" + (" [override]" if "oracle" in ov else ""),
+                      file=sys.stderr)
+            if "worker" in ov:
+                print(f"  ✓ Worker: {WORKER} [override]", file=sys.stderr)
+            if "browser" in ov:
+                print(f"  ✓ Browser agent: {BROWSER_AGENT_MODEL} [override]", file=sys.stderr)
             print(f"  ✓ Agent ready\n", file=sys.stderr)
 
         # TUI mode: launch Textual full-screen UI
@@ -9204,6 +9283,12 @@ def main():
                              "Shortcut: a leading positional 'q' "
                              "(e.g. dtt q \"what's the weather in Cape Town\")")
     parser.add_argument("--oraclepro", action="store_true", help="Use gpt-5.5-pro for oracle (default: gpt-5.5)")
+    parser.add_argument("--model", action="append", default=[], metavar="[ROLE=]SLUG",
+                        help="Override the model for a role: main, worker, oracle, or browser "
+                             "(e.g. --model oracle=x-ai/grok-5 --model worker=google/gemini-3.5-flash-lite). "
+                             "A bare slug targets main. Repeatable. ROLE=default clears a saved/env "
+                             "override. Takes precedence over q/--fast/--oraclepro defaults; persists "
+                             "across --resume; DTT_MODEL_<ROLE> env vars do the same with lower precedence.")
     parser.add_argument("--max-effort", action="store_true", help="Pin the GPT-5.5 oracle to 'high' reasoning effort, its native ceiling (Fable always runs at 'xhigh', OpenRouter's maximum)")
     parser.add_argument("--prompt", type=str, default=None, help="Inline prompt text")
     parser.add_argument("--cwd", type=str, default=".", help="Working directory for relative paths")
@@ -9229,10 +9314,15 @@ def main():
     parser.add_argument("positional_prompt", nargs="*", help="Task prompt (omit for interactive editor)")
     args = parser.parse_args()
 
+    global WORKER, BROWSER_AGENT_MODEL
+
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         print("Error: OPENROUTER_API_KEY environment variable not set.", file=sys.stderr)
         sys.exit(1)
+
+    cli_overrides = _parse_model_overrides(getattr(args, 'model', None))
+    saved_overrides = {}
 
     # Quick mode: --quick/-q, or a leading positional "q" (dtt q "...").
     quick = getattr(args, 'quick', False)
@@ -9273,11 +9363,14 @@ def main():
             max_loops = _rmeta["max_loops"]
         if not _passed("--max-effort") and _rmeta.get("max_effort"):
             max_effort = True
+        saved_overrides = dict(_rmeta.get("model_overrides") or {})
         if _rmeta:
             print(f"    Inherited config: {('quick+fast' if model == OPUS_FAST else 'quick') if quick else ('fast' if model == OPUS_FAST else 'standard')} mode, "
                   f"{'pro' if oracle_model == ORACLE_PRO else 'standard'} oracle, "
                   f"max_loops={max_loops or (QUICK_MAX_LOOPS if quick else MAX_LOOPS)}, "
-                  f"max_effort={max_effort}, cwd={cwd}", file=sys.stderr)
+                  f"max_effort={max_effort}, cwd={cwd}"
+                  + (f", model_overrides={saved_overrides}" if saved_overrides else ""),
+                  file=sys.stderr)
 
     if max_loops is None:
         max_loops = QUICK_MAX_LOOPS if quick else MAX_LOOPS
@@ -9285,6 +9378,43 @@ def main():
     if quick and args.orchestrator:
         print("Error: quick mode (q/--quick) and --orchestrator are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
+
+    # Per-role model overrides, lowest to highest precedence: DTT_MODEL_<ROLE>
+    # env vars, the resumed thread's saved overrides, then --model flags. The
+    # slug "default" clears the role at whichever layer it appears.
+    env_overrides = {}
+    for role in MODEL_ROLES:
+        val = os.environ.get(f"DTT_MODEL_{role.upper()}")
+        if val:
+            env_overrides[role] = val
+    model_overrides = {}
+    for layer in (env_overrides, saved_overrides, cli_overrides):
+        for role, slug in layer.items():
+            if str(slug).strip().lower() == "default":
+                model_overrides.pop(role, None)
+            else:
+                model_overrides[role] = slug
+    if "main" in model_overrides:
+        model = model_overrides["main"]
+    if "oracle" in model_overrides:
+        oracle_model = model_overrides["oracle"]
+    WORKER = model_overrides.get("worker", WORKER_DEFAULT)
+    desired_browser = model_overrides.get("browser", BROWSER_AGENT_MODEL_DEFAULT)
+    if desired_browser != BROWSER_AGENT_MODEL:
+        BROWSER_AGENT_MODEL = desired_browser
+        # A per-run config file, so parallel runs with different overrides
+        # don't clobber each other's shared TOML.
+        if not _write_notte_config(BASE / f"notte_dtt_config_{os.getpid()}.toml"):
+            print("  ⚠ browser model override ignored: NOTTE_CONFIG_PATH is set externally",
+                  file=sys.stderr)
+    # Children (orchestrator workers, run_code scripts) inherit the effective
+    # overrides through the environment; clear the vars for roles reset to
+    # default so a cleared override doesn't resurrect in a child.
+    for role in MODEL_ROLES:
+        if role in model_overrides:
+            os.environ[f"DTT_MODEL_{role.upper()}"] = model_overrides[role]
+        else:
+            os.environ.pop(f"DTT_MODEL_{role.upper()}", None)
 
     # Early pipe mode validation (before orchestrator or prompt collection)
     if getattr(args, 'pipe', False):
@@ -9362,6 +9492,7 @@ def main():
             max_effort=max_effort,
             show_full=getattr(args, 'show_full', False),
             quick=quick,
+            model_overrides=model_overrides,
         ))
     except KeyboardInterrupt:
         pass
