@@ -112,9 +112,10 @@ Usage:
 Quick mode:
   ./dtt.sh q "what's the weather like in Cape Town today"
   ./dtt.sh q "create an SSH key for me and copy it to clipboard"
-                  One-shots the task on Opus 4.8-fast: stacked/staged tool
-                  calls, no oracle, as few turns as possible. Also available
-                  as -q/--quick. Default loop cap drops to 15.
+                  One-shots the task on Opus 4.8: stacked/staged tool calls,
+                  no oracle, as few turns as possible. Also available as
+                  -q/--quick. Add --fast for Opus 4.8-fast (quicker output,
+                  costs more). Default loop cap drops to 15.
 
 Flags:
   --fast          Use anthropic/claude-opus-4.8-fast:online instead of fable 5
@@ -403,6 +404,9 @@ OPENROUTER_STATS= "https://openrouter.ai/api/v1/generation"
 # contexts (~60k+ tokens), returning an empty error that looks like "won't use
 # tools." The agent has native search_web/fetch_page tools, so it's redundant here.
 FABLE           = "anthropic/claude-fable-5"
+# Quick mode's default. The -fast variant answers sooner but costs several
+# times more per token; quick mode only uses it when --fast is passed too.
+OPUS            = "anthropic/claude-opus-4.8"
 OPUS_FAST       = "anthropic/claude-opus-4.8-fast"
 # Secondary "worker" model: result-mode summarization, delegation, image/data
 # analysis, batch processing, and context compaction. The browser agent uses its
@@ -9195,8 +9199,9 @@ def main():
     )
     parser.add_argument("--fast", action="store_true", help="Use claude-opus-4.8-fast:online")
     parser.add_argument("--quick", "-q", action="store_true",
-                        help="Quick mode: one-shot the task on Opus 4.8-fast with stacked tool calls, "
-                             "no oracle, minimal turns. Shortcut: a leading positional 'q' "
+                        help="Quick mode: one-shot the task on Opus 4.8 with stacked tool calls, "
+                             "no oracle, minimal turns. Combine with --fast for Opus 4.8-fast. "
+                             "Shortcut: a leading positional 'q' "
                              "(e.g. dtt q \"what's the weather in Cape Town\")")
     parser.add_argument("--oraclepro", action="store_true", help="Use gpt-5.5-pro for oracle (default: gpt-5.5)")
     parser.add_argument("--max-effort", action="store_true", help="Pin the GPT-5.5 oracle to 'high' reasoning effort, its native ceiling (Fable always runs at 'xhigh', OpenRouter's maximum)")
@@ -9235,7 +9240,12 @@ def main():
         quick = True
         args.positional_prompt = args.positional_prompt[1:]
 
-    model = OPUS_FAST if (args.fast or quick) else FABLE
+    # Quick mode runs normal Opus 4.8; add --fast for the pricier -fast variant.
+    # Outside quick mode, --fast keeps its old meaning (Opus 4.8-fast vs Fable).
+    if quick:
+        model = OPUS_FAST if args.fast else OPUS
+    else:
+        model = OPUS_FAST if args.fast else FABLE
     oracle_model = ORACLE_PRO if args.oraclepro else ORACLE_DEFAULT
     cwd = str(Path(args.cwd).expanduser().resolve())
     max_loops = args.max_loops  # None until defaulted below (after resume inherit)
@@ -9252,7 +9262,7 @@ def main():
             return any(a == flag or a.startswith(flag + "=") for a in sys.argv)
         if _rmeta.get("quick"):
             quick = True
-            model = OPUS_FAST
+            model = OPUS_FAST if (_passed("--fast") or _rmeta.get("model") == OPUS_FAST) else OPUS
         if not _passed("--fast") and _rmeta.get("model") == OPUS_FAST:
             model = OPUS_FAST
         if not _passed("--oraclepro") and _rmeta.get("oracle_model") == ORACLE_PRO:
@@ -9264,7 +9274,7 @@ def main():
         if not _passed("--max-effort") and _rmeta.get("max_effort"):
             max_effort = True
         if _rmeta:
-            print(f"    Inherited config: {'quick' if quick else ('fast' if model == OPUS_FAST else 'standard')} mode, "
+            print(f"    Inherited config: {('quick+fast' if model == OPUS_FAST else 'quick') if quick else ('fast' if model == OPUS_FAST else 'standard')} mode, "
                   f"{'pro' if oracle_model == ORACLE_PRO else 'standard'} oracle, "
                   f"max_loops={max_loops or (QUICK_MAX_LOOPS if quick else MAX_LOOPS)}, "
                   f"max_effort={max_effort}, cwd={cwd}", file=sys.stderr)

@@ -47,7 +47,7 @@ dtt q "what's the weather like in Cape Town today"
 dtt q "create an SSH key for me and copy it to clipboard"
 ```
 
-Quick mode runs on Opus 4.8-fast at reduced reasoning effort, with a trimmed toolset: no oracle, no plan or notes bookkeeping, no batch machinery, and skills stay out of the prompt until invoked. The prompt pushes it to one-shot the task. Its first reply stacks every tool call the job needs, staged with `exec_order` where order matters, and the next reply is the answer. The loop cap drops to 15 turns. `-q` and `--quick` do the same thing as the `q` prefix.
+Quick mode runs on Opus 4.8 at reduced reasoning effort, with a trimmed toolset: no oracle, no plan or notes bookkeeping, no batch machinery, and skills stay out of the prompt until invoked. The prompt pushes it to one-shot the task. Its first reply stacks every tool call the job needs, staged with `exec_order` where order matters, and the next reply is the answer. The loop cap drops to 15 turns. `-q` and `--quick` do the same thing as the `q` prefix. Add `--fast` if you want Opus 4.8-fast for quicker output; it costs quite a bit more per token.
 
 ## Requirements
 
@@ -68,7 +68,7 @@ Everything else is installed automatically into `/tmp/dothething` on first run.
 
 | Flag | What it does |
 |---|---|
-| `q` (or `-q`, `--quick`) | Quick mode: one-shot the task on Opus 4.8-fast with a trimmed toolset and no oracle |
+| `q` (or `-q`, `--quick`) | Quick mode: one-shot the task on Opus 4.8 with a trimmed toolset and no oracle. Add `--fast` for Opus 4.8-fast |
 | `--prompt "..."` | Provide the task inline instead of opening the editor |
 | `--fast` | Use claude-opus-4.8-fast:online (cheaper, slightly less capable) |
 | `--cwd DIR` | Set the working directory for file operations (default: `.`) |
@@ -134,7 +134,7 @@ All calls route through OpenRouter. You only need one API key.
 
 | Role | Default model | Flag to change |
 |---|---|---|
-| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast; quick mode (`q`) always uses Opus 4.8-fast |
+| Main agent | Claude Fable 5 | `--fast` for Opus 4.8-fast; quick mode (`q`) uses Opus 4.8, or Opus 4.8-fast with `--fast` |
 | Summarizer, analysis, delegate | Google Gemini 3.5 Flash | -- |
 | Browser agent (Notte) | Claude Sonnet 4.6 | -- |
 | Oracle | GPT-5.5 | `--oraclepro` for GPT-5.5-pro (not exposed in quick mode) |

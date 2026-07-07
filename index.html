@@ -681,7 +681,7 @@
                     <div class="col-6">
                         <ul class="feature-list">
                             <li><strong>Quick Mode</strong>
-                            <code>dtt q "what's the weather in Cape Town"</code> for small tasks. Runs Opus 4.8-fast with a trimmed toolset (no oracle, no planning bookkeeping) and aims to finish in two turns: one reply carrying every tool call the job needs, staged with <code>exec_order</code>, then the answer. Loop cap drops to 15.</li>
+                            <code>dtt q "what's the weather in Cape Town"</code> for small tasks. Runs Opus 4.8 with a trimmed toolset (no oracle, no planning bookkeeping) and aims to finish in two turns: one reply carrying every tool call the job needs, staged with <code>exec_order</code>, then the answer. Loop cap drops to 15. Add <code>--fast</code> for Opus 4.8-fast.</li>
                             <li><strong>Thread Persistence</strong>
                             Sessions save to <code>~/.dtt/threads/</code> with timestamped IDs. Pick up where you left off with <code>--resume &lt;id&gt;</code>. Full cost breakdown prints on exit: tokens, cache hits, dollars.</li>
                             <li><strong>Prompt Caching</strong>
@@ -772,7 +772,7 @@
                 <table class="data-table" vid="145">
                     <tbody vid="146">
                         <tr vid="147"><td class="col-key" vid="148">--prompt</td><td class="col-val" vid="149">Initial task description.</td></tr>
-                        <tr><td class="col-key">q / --quick</td><td class="col-val">Quick mode: one-shot on Opus 4.8-fast, stacked tool calls, no oracle.</td></tr>
+                        <tr><td class="col-key">q / --quick</td><td class="col-val">Quick mode: one-shot on Opus 4.8, stacked tool calls, no oracle.</td></tr>
                         <tr vid="150"><td class="col-key" vid="151">--fast</td><td class="col-val" vid="152">Swaps to Opus 4.8-fast.</td></tr>
                         <tr vid="153"><td class="col-key" vid="154">--oraclepro</td><td class="col-val" vid="155">Upgrades oracle to GPT-5.5-pro.</td></tr>
                         <tr><td class="col-key">--max-effort</td><td class="col-val">Pin oracle effort to high, its native ceiling (Fable always xhigh).</td></tr>
