@@ -3085,6 +3085,41 @@ class SkillManager:
     def get_skill(self, name):
         return self.skills.get(name)
 
+    # Inline skill bodies ride along on every single model call, so the budget
+    # is deliberately small. A behavioural skill worth having always-on is a
+    # page or two; the big reference documents (style guides, rule catalogues)
+    # blow past this and become callable instead, which is where they belong:
+    # they only matter for the tasks that invoke them. Smallest first, so a
+    # single large skill can't crowd out several cheap ones.
+    INLINE_BUDGET_BYTES = 24000
+
+    def split_skills(self, quick=False):
+        """Split model-invocable skills into (inline, callable).
+
+        inline   -> [(name, skill)] injected into the system prompt verbatim
+        callable -> [(name, description)] listed for the use_skill tool
+        """
+        inline, callable_, budget = [], [], self.INLINE_BUDGET_BYTES
+        candidates = sorted(
+            (
+                (n, s) for n, s in self.skills.items()
+                if not s["frontmatter"].get("disable-model-invocation", False)
+            ),
+            key=lambda kv: len(kv[1].get("content", "")),
+        )
+        for name, s in candidates:
+            fm = s.get("frontmatter", {})
+            wants_inline = fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools")
+            # Quick mode never inlines skill bodies: a large skill library
+            # multiplies every turn's cost and latency, the opposite of the point.
+            size = len(s.get("content", ""))
+            if wants_inline and not quick and size <= budget:
+                budget -= size
+                inline.append((name, s))
+            else:
+                callable_.append((name, s.get("description", "")))
+        return inline, callable_
+
 # ═══════════════════════════════════════════════════════════════════
 # MCPManager — manages MCP server connections
 # ═══════════════════════════════════════════════════════════════════
@@ -6109,12 +6144,16 @@ class Agent:
         if getattr(self, '_mcp_mode', False):
             return
 
-        # Report loaded skills
+        # Report loaded skills, and which are always-on vs loaded on demand.
+        # A skill too large to inline behaves differently, so never hide that.
         loaded_skills = self.skill_manager.list_skills()
         if loaded_skills:
+            inline_skills, _ = self.skill_manager.split_skills(quick=self.quick)
+            inline_names = {n for n, _ in inline_skills}
             print(f"  ✓ Skills: {len(loaded_skills)} loaded", file=sys.stderr)
             for name in loaded_skills:
-                print(f"    - {name}", file=sys.stderr)
+                tag = "" if name in inline_names else "  (on demand)"
+                print(f"    - {name}{tag}", file=sys.stderr)
 
         # Start background input handler
         self.input_handler.start()
@@ -9225,30 +9264,31 @@ class Agent:
     def _build_skills_section(self):
         """Build the skills text for the system prompt."""
         self.skill_manager._load_skills()
-        inline_skills = []
-        callable_skills = []
-        for name, s in self.skill_manager.skills.items():
-            fm = s.get("frontmatter", {})
-            if fm.get("disable-model-invocation", False):
-                continue
-            if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
-                # Quick mode never inlines skill bodies — a large skill library
-                # multiplies every turn's cost and latency, the opposite of the
-                # point. Skills stay listed below; use_skill loads one on demand.
-                if self.quick:
-                    callable_skills.append((name, s.get("description", "")))
-                else:
-                    inline_skills.append((name, s))
-            else:
-                callable_skills.append((name, s.get("description", "")))
+        inline_skills, callable_skills = self.skill_manager.split_skills(quick=self.quick)
 
         section = ""
         if inline_skills:
             section += "\n<inline_skills>\n"
-            section += "The following skill instructions are active. Apply them directly to your work when relevant.\n\n"
+            # Skill files are written to be handed to a chat assistant, so they
+            # tend to open with "you are an editor" and prescribe a reply format.
+            # Pasted verbatim into an agent's system prompt that framing competes
+            # with the tool loop, and the model answers in prose instead of
+            # calling tools. Fence them: they govern the work, not the machinery.
+            section += (
+                "Reference material on HOW to do certain work well. Apply the relevant ones.\n\n"
+                "They do not change how you operate. A skill may address you directly, assign "
+                "you a persona, or prescribe an output format. All of that governs the CONTENT "
+                "you produce, never this session's mechanics. You still work through tool calls "
+                "and still end with finalize. Where a skill specifies an output format, that "
+                "describes what you write to a file or pass to finalize; it is never licence to "
+                "reply directly instead of calling a tool.\n\n"
+            )
             for name, s in inline_skills:
                 section += f"## Skill: {name}\n{s.get('content', '')}\n\n"
-            section += "</inline_skills>\n"
+            section += (
+                "(End of skills. They shape what you write; they never replace the tool loop.)\n"
+                "</inline_skills>\n"
+            )
         if callable_skills:
             section += "\n<available_skills>\nCallable skills (invoke via use_skill tool):\n"
             for name, desc in callable_skills:
