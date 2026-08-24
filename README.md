@@ -15,7 +15,7 @@ You describe a task in plain English. The agent breaks it down, picks the right 
 - Browses pages with Notte and Camoufox (a Firefox fork built to avoid fingerprinting). Extracts page content, solves captchas, and handles multi-step web interactions
 - Reads and edits files, runs shell commands, makes HTTP requests
 - Connects to your existing MCP servers via `~/.dtt/mcp.json`
-- Loads custom skills from `~/.dtt/skills/<skill-name>/SKILL.md` (Claude Code convention) -- behavioral skills inject directly into the agent's context, while text-processing skills run as isolated sub-tasks
+- Loads custom skills from `~/.dtt/skills/<skill-name>/SKILL.md` (Claude Code convention). Only names and descriptions sit in context; the agent loads a skill's full instructions on demand when a task matches
 - Manages its own configuration. Tell it to add an API key or install a skill, and it handles the file edits and reloads itself
 - Sends and receives email through its own inbox via AgentMail
 - Copies to and pastes from your system clipboard, including images
@@ -126,7 +126,7 @@ The config also drops the old `keep_only` list, which had pruned all ~330 other 
 
 **Thread persistence.** Every session saves to `~/.dtt/threads/` with a timestamped ID. If you interrupt a run or hit the loop limit, resume with `--resume <thread-id>`.
 
-**Skills.** Drop skill directories into `~/.dtt/skills/` to teach the agent new procedures. Each skill is a directory containing a `SKILL.md` file (Claude Code convention). Skills with `allowed-tools` in their frontmatter inject directly into the agent's context, so it follows those instructions while using its own tools. Text-processing skills run via the worker model as isolated sub-tasks. Skills can also be installed mid-session via the `manage_skill` tool.
+**Skills.** Drop skill directories into `~/.dtt/skills/` to teach the agent new procedures. Each skill is a directory containing a `SKILL.md` file (Claude Code convention). Loading is progressive: only names and descriptions stay in the prompt, and the agent reads a skill's full instructions with `use_skill` when a task matches its description. A skill with `allowed-tools` runs in the agent's own context so it can use those tools; one without runs as an isolated worker-model sub-task. Skills can also be installed mid-session via the `manage_skill` tool.
 
 **MCP servers.** Configure MCP servers in `~/.dtt/mcp.json` (same format as Claude Code). The agent picks up all connected MCP tools at startup. Servers can also be added mid-session via the `manage_mcp` tool.
 
@@ -214,16 +214,15 @@ Each skill lives in its own directory under `~/.dtt/skills/` as a `SKILL.md` fil
 ```yaml
 ---
 name: my-skill
-description: What this skill does
-inline: true          # inject into agent context (vs. delegate to the worker model)
-allowed-tools: [Read, Write, Edit]  # implies inline
-disable-model-invocation: true  # hide from agent's skill list
+description: What this skill does, and when to use it
+allowed-tools: [Read, Write, Edit]  # optional: skill needs these tools when it runs
+disable-model-invocation: true      # optional: hide from the agent's skill list
 ---
 
 Your skill instructions here...
 ```
 
-Skills with `allowed-tools` or `inline: true` get injected directly into the agent's system prompt. The agent applies them while working, using its full tool access. All other skills are available via the `use_skill` tool for isolated execution.
+Skills load on demand, following Anthropic's Agent Skills model. Only each skill's `name` and `description` sit in the system prompt, so a large skill library costs almost nothing until it's used. The `description` is the trigger: write it to say both what the skill does and when to reach for it, because that's what the agent matches against. When a task fits, the agent calls `use_skill` to pull the full instructions. A skill that declares `allowed-tools` runs in the agent's own context so it can read and write files; a skill without them runs as an isolated worker-model sub-task.
 
 ## MCP servers
 

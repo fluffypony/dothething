@@ -3085,41 +3085,6 @@ class SkillManager:
     def get_skill(self, name):
         return self.skills.get(name)
 
-    # Inline skill bodies ride along on every single model call, so the budget
-    # is deliberately small. A behavioural skill worth having always-on is a
-    # page or two; the big reference documents (style guides, rule catalogues)
-    # blow past this and become callable instead, which is where they belong:
-    # they only matter for the tasks that invoke them. Smallest first, so a
-    # single large skill can't crowd out several cheap ones.
-    INLINE_BUDGET_BYTES = 24000
-
-    def split_skills(self, quick=False):
-        """Split model-invocable skills into (inline, callable).
-
-        inline   -> [(name, skill)] injected into the system prompt verbatim
-        callable -> [(name, description)] listed for the use_skill tool
-        """
-        inline, callable_, budget = [], [], self.INLINE_BUDGET_BYTES
-        candidates = sorted(
-            (
-                (n, s) for n, s in self.skills.items()
-                if not s["frontmatter"].get("disable-model-invocation", False)
-            ),
-            key=lambda kv: len(kv[1].get("content", "")),
-        )
-        for name, s in candidates:
-            fm = s.get("frontmatter", {})
-            wants_inline = fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools")
-            # Quick mode never inlines skill bodies: a large skill library
-            # multiplies every turn's cost and latency, the opposite of the point.
-            size = len(s.get("content", ""))
-            if wants_inline and not quick and size <= budget:
-                budget -= size
-                inline.append((name, s))
-            else:
-                callable_.append((name, s.get("description", "")))
-        return inline, callable_
-
 # ═══════════════════════════════════════════════════════════════════
 # MCPManager — manages MCP server connections
 # ═══════════════════════════════════════════════════════════════════
@@ -4688,11 +4653,13 @@ TOOLS = [
         "function": {
             "name": "use_skill",
             "description": (
-                "Invoke a loaded skill by name. Skills are user-defined procedures loaded "
-                "from ~/.dtt/skills/. mode='delegate' runs the skill as an isolated worker-model "
-                "sub-task. mode='read' returns the full skill instructions into your context "
-                "so you can execute them yourself with your tools. Skills marked as inline "
-                "in the system prompt are already active — follow their instructions directly."
+                "Invoke a skill by name. Skills are user-defined procedures loaded from "
+                "~/.dtt/skills/; the available_skills list gives each one's name and when to "
+                "use it. Only the description is in context, so call this to pull the full "
+                "instructions when a task matches. mode='read' returns the instructions into "
+                "your own context so you execute them with your tools (best when the skill "
+                "needs to read or write files); mode='delegate' runs the skill as an isolated "
+                "worker-model sub-task (best for self-contained text processing)."
             ),
             "parameters": {
                 "type": "object",
@@ -5505,11 +5472,11 @@ over 200K chars. Use output_file to write results directly to disk.
 - delegate: Now supports input_file parameter to pass file contents as context. \
 Use for file-based text processing, extraction, reformatting. For very large files \
 prefer analyze_data which supports chunking.
-- use_skill: Invoke with mode='read' to load a skill's full instructions into \
-your context (you then execute the steps yourself with your tools). Use \
-mode='delegate' to run a text-processing skill as an isolated worker-model sub-task. \
-Skills marked as inline in the system prompt are already active — follow their \
-instructions directly without invoking use_skill.
+- use_skill: The available_skills list carries only each skill's name and when to \
+use it; the instructions load on demand. When a task matches a skill, invoke it: \
+mode='read' loads its full instructions into your context (you then execute the \
+steps yourself with your tools), mode='delegate' runs a text-processing skill as an \
+isolated worker-model sub-task.
 - batch_process: THE tool for massive parallel workloads. Fans out to the worker model in \
 parallel with up to 50 concurrent workers. For very large datasets (500+), split \
 into chunks and call batch_process repeatedly — this IS the correct pattern, not \
@@ -6144,16 +6111,13 @@ class Agent:
         if getattr(self, '_mcp_mode', False):
             return
 
-        # Report loaded skills, and which are always-on vs loaded on demand.
-        # A skill too large to inline behaves differently, so never hide that.
+        # Report discoverable skills. All load on demand via use_skill, so the
+        # count is just what the model can reach for, at no per-call cost.
         loaded_skills = self.skill_manager.list_skills()
         if loaded_skills:
-            inline_skills, _ = self.skill_manager.split_skills(quick=self.quick)
-            inline_names = {n for n, _ in inline_skills}
-            print(f"  ✓ Skills: {len(loaded_skills)} loaded", file=sys.stderr)
+            print(f"  ✓ Skills: {len(loaded_skills)} available", file=sys.stderr)
             for name in loaded_skills:
-                tag = "" if name in inline_names else "  (on demand)"
-                print(f"    - {name}{tag}", file=sys.stderr)
+                print(f"    - {name}", file=sys.stderr)
 
         # Start background input handler
         self.input_handler.start()
@@ -7367,8 +7331,9 @@ class Agent:
 
         fm = skill.get("frontmatter", {})
 
-        # Force read mode for skills that need main agent tools
-        if fm.get("inline") or fm.get("in_context") or fm.get("allowed-tools"):
+        # A skill that declares allowed-tools needs the main agent's tools, so it
+        # runs in the main context (read mode), not as an isolated worker sub-task.
+        if fm.get("allowed-tools"):
             mode = "read"
 
         if mode == "read":
@@ -9277,39 +9242,29 @@ class Agent:
         content.append(self._build_temporal_block())
 
     def _build_skills_section(self):
-        """Build the skills text for the system prompt."""
-        self.skill_manager._load_skills()
-        inline_skills, callable_skills = self.skill_manager.split_skills(quick=self.quick)
+        """Build the skills text for the system prompt.
 
-        section = ""
-        if inline_skills:
-            section += "\n<inline_skills>\n"
-            # Skill files are written to be handed to a chat assistant, so they
-            # tend to open with "you are an editor" and prescribe a reply format.
-            # Pasted verbatim into an agent's system prompt that framing competes
-            # with the tool loop, and the model answers in prose instead of
-            # calling tools. Fence them: they govern the work, not the machinery.
-            section += (
-                "Reference material on HOW to do certain work well. Apply the relevant ones.\n\n"
-                "They do not change how you operate. A skill may address you directly, assign "
-                "you a persona, or prescribe an output format. All of that governs the CONTENT "
-                "you produce, never this session's mechanics. You still work through tool calls "
-                "and still end with finalize. Where a skill specifies an output format, that "
-                "describes what you write to a file or pass to finalize; it is never licence to "
-                "reply directly instead of calling a tool.\n\n"
-            )
-            for name, s in inline_skills:
-                section += f"## Skill: {name}\n{s.get('content', '')}\n\n"
-            section += (
-                "(End of skills. They shape what you write; they never replace the tool loop.)\n"
-                "</inline_skills>\n"
-            )
-        if callable_skills:
-            section += "\n<available_skills>\nCallable skills (invoke via use_skill tool):\n"
-            for name, desc in callable_skills:
-                section += f"  - {name}: {desc}\n"
-            section += "Use mode='delegate' for isolated sub-task execution via the worker model, or mode='read' to load the full instructions into your own context.\n"
-            section += "</available_skills>\n"
+        Progressive disclosure, per Anthropic's Agent Skills model: only each
+        skill's name and description sit in the prompt (~a line each). The body
+        never rides on every call: the model reads the `description` as the
+        trigger and pulls the full instructions on demand with use_skill. That
+        keeps a large skill library free until something actually needs it.
+        """
+        self.skill_manager._load_skills()
+        skills = self.skill_manager.list_skills()  # {name: description}, model-invocable only
+        if not skills:
+            return ""
+        section = (
+            "\n<available_skills>\n"
+            "Skills package how to do specific kinds of work well. Each line is a name and, "
+            "after the colon, WHAT it does and WHEN to use it. When a task matches one, load "
+            "it with use_skill before doing that work. mode='read' pulls the full instructions "
+            "into your own context (then follow them with your normal tools), or mode='delegate' "
+            "runs it as an isolated sub-task on the worker model.\n"
+        )
+        for name, desc in skills.items():
+            section += f"  - {name}: {desc}\n"
+        section += "</available_skills>\n"
         return section
 
     def _build_mcp_section(self):
