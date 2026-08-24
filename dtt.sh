@@ -9037,6 +9037,17 @@ class Agent:
                     text = None  # Don't store the JSON as text content
 
             if not tool_calls:
+                # A provider refusal comes back as an empty message: no content,
+                # no tool calls. Nudging it is pointless and expensive (each retry
+                # resends the whole context), and "won't use tools" sends you off
+                # debugging the agent when the model simply declined. Say so and stop.
+                if str(choice.get("finish_reason") or "") == "content_filter" or \
+                   str(choice.get("native_finish_reason") or "").lower() == "refusal":
+                    print(f"  ⚠ {self.model} refused this request (no content returned). "
+                          "Rephrase the task, or run it on another model with "
+                          "--model main=<slug>.", file=sys.stderr)
+                    self._final_status = "failed"
+                    break
                 nudge_count += 1
                 _nudge_msg = {"role": "assistant", "content": text or ""}
                 self.messages.append(_nudge_msg)
@@ -9230,7 +9241,11 @@ class Agent:
                 self._show_final("(finalize called)")
                 return
 
-        print("\n  ⚠ Maximum loops reached.", file=sys.stderr)
+        else:
+            # for/else: only when the loop actually ran out of turns. Every break
+            # above stops for its own reason and prints its own message, so firing
+            # this as well reported a single failure as two separate ones.
+            print("\n  ⚠ Maximum loops reached.", file=sys.stderr)
 
     # ── Temporal block (live date/time, refreshed per model call) ──
     def _build_temporal_block(self):
