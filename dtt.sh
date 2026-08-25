@@ -276,13 +276,6 @@ HELP
   esac
 done
 
-# In MCP-server mode, fd1 is the JSON-RPC channel. Save it to fd3 and point the
-# preamble's stdout at stderr so nothing but protocol reaches the client; the
-# python exec below restores fd1 from fd3.
-if [ "$BROWSER_MCP" = true ]; then
-  exec 3>&1 1>&2
-fi
-
 if [ "$DO_INSTALL" = true ]; then
     dtt_install
     exit 0
@@ -295,6 +288,12 @@ if [ "$FORCE_UPDATE" = true ]; then
 fi
 dtt_update && _upd=0 || _upd=$?
 if [ "$_upd" -eq 42 ]; then exec "$DTT_SELF" "$@"; fi
+
+# In MCP-server mode, fd1 is the JSON-RPC channel. Save it only after the
+# auto-update re-exec, or the second launch replaces fd3 with stderr.
+if [ "$BROWSER_MCP" = true ]; then
+  exec 3>&1 1>&2
+fi
 
 for required in python3 git; do
   if ! command -v "$required" >/dev/null 2>&1; then
