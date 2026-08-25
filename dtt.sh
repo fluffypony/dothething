@@ -334,7 +334,7 @@ if [ -f "$DTT_ENV_FILE" ]; then
     unset _dtt_was_set_OR _dtt_was_set_TC _dtt_was_set_AM _dtt_was_set_AI _dtt_was_set_AH
 fi
 
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ "$BROWSER_MCP" != true ]; then
     if ! [ -t 0 ]; then
         echo "Error: OPENROUTER_API_KEY is not set and stdin is not a TTY for first-run setup." >&2
         echo "       Export OPENROUTER_API_KEY, or run dtt once interactively to save it to $DTT_ENV_FILE." >&2
@@ -383,7 +383,7 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
 fi
 
 # Final guard — should never fire if the block above succeeded
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ "$BROWSER_MCP" != true ]; then
     echo "Error: OPENROUTER_API_KEY is not set." >&2
     exit 1
 fi
@@ -10426,7 +10426,8 @@ def _browser_mcp_tools(types):
                 "Hand a natural-language goal to dtt's autonomous browser agent "
                 "(Notte + Camoufox). It drives the whole flow — navigation, "
                 "forms, logins, multi-step interactions — and returns the result "
-                "plus the final page. Use for tasks you'd rather not script."
+                "plus the final page. Its reasoning model requires "
+                "OPENROUTER_API_KEY; the other browser tools do not."
             ),
             inputSchema={
                 "type": "object",
@@ -10446,10 +10447,7 @@ async def run_browser_mcp():
     import mcp.server.stdio
     from mcp.server import Server
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY not set.", file=sys.stderr)
-        return
+    api_key = os.environ.get("OPENROUTER_API_KEY") or ""
 
     print("▸ Starting dtt browser MCP server (stdio)...", file=sys.stderr)
     agent = Agent(NORMAL_MAIN, NORMAL_ORACLE, api_key, str(Path.cwd()),
@@ -10474,6 +10472,11 @@ async def run_browser_mcp():
         if name == "dtt_fetch":
             return await agent._tool_fetch_page(a["url"], mode=a.get("mode"))
         if name == "dtt_browser_agent":
+            if not api_key:
+                raise RuntimeError(
+                    "dtt_browser_agent requires OPENROUTER_API_KEY because its "
+                    "Notte reasoning model runs through OpenRouter"
+                )
             return await agent._tool_browser_agent(
                 a["task"], url=a.get("url"), max_steps=a.get("max_steps", 20))
         if name == "dtt_browser":
@@ -11231,11 +11234,6 @@ def main():
 
     global WORKER, BROWSER_AGENT_MODEL, PERCEPTION_MODEL
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY environment variable not set.", file=sys.stderr)
-        sys.exit(1)
-
     # Browser MCP server: a distinct entrypoint that serves stdio and exits.
     if getattr(args, 'browsermcp', False):
         try:
@@ -11243,6 +11241,11 @@ def main():
         except KeyboardInterrupt:
             pass
         return
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("Error: OPENROUTER_API_KEY environment variable not set.", file=sys.stderr)
+        sys.exit(1)
 
     cli_overrides = _parse_model_overrides(getattr(args, 'model', None))
     saved_overrides = {}
