@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="3.0.3"
+DTT_VERSION="3.0.4"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -10366,7 +10366,7 @@ def _browser_mcp_tools(types):
                 "through a stealth browser, so results aren't the bot-walled "
                 "subset). Returns ranked title/url/snippet results."
             ),
-            input_schema={
+            inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
@@ -10385,7 +10385,7 @@ def _browser_mcp_tools(types):
                 "most bot walls and captchas; mode='text' is a fast no-browser "
                 "fetch; mode='screenshot' saves a PNG and returns its path."
             ),
-            input_schema={
+            inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {"type": "string"},
@@ -10404,7 +10404,7 @@ def _browser_mcp_tools(types):
                 "(→ page markdown), screenshot (→ PNG path). The session persists "
                 "across calls, so cookies and navigation carry over."
             ),
-            input_schema={
+            inputSchema={
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": list(BROWSER_MCP_ACTIONS)},
@@ -10425,7 +10425,7 @@ def _browser_mcp_tools(types):
                 "forms, logins, multi-step interactions — and returns the result "
                 "plus the final page. Use for tasks you'd rather not script."
             ),
-            input_schema={
+            inputSchema={
                 "type": "object",
                 "properties": {
                     "task": {"type": "string"},
@@ -10457,8 +10457,11 @@ async def run_browser_mcp():
     print("  ✓ search + browser stack ready. Tools: dtt_search, dtt_fetch, "
           "dtt_browser, dtt_browser_agent", file=sys.stderr)
 
-    async def on_list_tools(ctx, params):
-        return types.ListToolsResult(tools=_browser_mcp_tools(types))
+    server = Server("dothething-browser", version="1.0")
+
+    @server.list_tools()
+    async def on_list_tools():
+        return _browser_mcp_tools(types)
 
     async def dispatch(name, a):
         if name == "dtt_search":
@@ -10489,19 +10492,18 @@ async def run_browser_mcp():
             return json.dumps(result, indent=1, default=str)[:20000]
         return f"Error: unknown tool '{name}'."
 
-    async def on_call_tool(ctx, params):
+    @server.call_tool()
+    async def on_call_tool(name, arguments):
         try:
-            text = await dispatch(params.name, params.arguments or {})
+            text = await dispatch(name, arguments or {})
             return types.CallToolResult(content=[types.TextContent(type="text", text=str(text))])
         except Exception as e:
             if os.environ.get("DTT_DEBUG"):
                 traceback.print_exc()
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=f"Error: {e}")],
-                is_error=True)
+                isError=True)
 
-    server = Server("dothething-browser", version="1.0",
-                    on_list_tools=on_list_tools, on_call_tool=on_call_tool)
     try:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
