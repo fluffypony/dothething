@@ -9866,10 +9866,12 @@ class Agent:
 
     # ── Cleanup ──────────────────────────────────────────────────
     async def cleanup(self):
+        mcp_mode = getattr(self, "_mcp_mode", False)
         self.input_handler.stop()
         self.spinner.stop()
         self.events.emit("exit", code=0 if self._finalized else 1)
-        print("\n  ⏳ Cleaning up…", file=sys.stderr)
+        if not mcp_mode:
+            print("\n  ⏳ Cleaning up…", file=sys.stderr)
         # Clean up persistent shell
         if self._shell_proc and self._shell_proc.poll() is None:
             self._shell_proc.terminate()
@@ -9889,12 +9891,14 @@ class Agent:
         self._browser_agent_executor.shutdown(wait=False, cancel_futures=True)
         await self.browser.close()
         await self.mcp_manager.stop()
-        print("  ⏳ Fetching cost data…", file=sys.stderr)
-        await self.cost_tracker.drain(timeout=30)
-        self._persist_thread_totals()
+        if not mcp_mode:
+            print("  ⏳ Fetching cost data…", file=sys.stderr)
+            await self.cost_tracker.drain(timeout=30)
+            self._persist_thread_totals()
         if self.http:
             await self.http.aclose()
-        self._show_cost_report()
+        if not mcp_mode:
+            self._show_cost_report()
 
 # ═══════════════════════════════════════════════════════════════════
 # CLI entry point
