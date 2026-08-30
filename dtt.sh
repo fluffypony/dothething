@@ -615,7 +615,7 @@ cat > "$BASE/agent.py" << 'PYTHON_AGENT'
 """dothething — autonomous AI agent | https://dotheth.ing"""
 
 import os, sys, json, time, asyncio, subprocess, socket, re, atexit, signal
-import threading, argparse, shlex, shutil, traceback, copy
+import threading, argparse, shlex, shutil, traceback, copy, stat
 import fnmatch, difflib, hashlib, base64, mimetypes, uuid
 import tempfile, contextlib, concurrent.futures
 from pathlib import Path
@@ -3272,169 +3272,74 @@ def file_sha256(path):
             h.update(chunk)
     return h.hexdigest()
 
-def parse_regex_flags(flag_text):
-    flags = 0
-    for f in [x.strip().upper() for x in flag_text.replace(",", " ").split() if x.strip()]:
-        if f in ("I", "IGNORECASE"):
-            flags |= re.IGNORECASE
-        elif f in ("M", "MULTILINE"):
-            flags |= re.MULTILINE
-        elif f in ("S", "DOTALL"):
-            flags |= re.DOTALL
-        elif f in ("X", "VERBOSE"):
-            flags |= re.VERBOSE
-        else:
-            raise RuntimeError(f"Unsupported regex flag: {f}")
-    return flags
+def _newline_style(text):
+    """Return the dominant newline sequence in text."""
+    crlf_count = text.count("\r\n")
+    lf_count = text.count("\n") - crlf_count
+    cr_count = text.count("\r") - crlf_count
+    if crlf_count and crlf_count >= max(lf_count, cr_count):
+        return "\r\n"
+    if cr_count and cr_count > lf_count:
+        return "\r"
+    return "\n"
 
-# SEARCH/REPLACE patch format from GPT2
-PATCH_BLOCK_RE = re.compile(
-    r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE",
-    re.DOTALL,
-)
+def _normalise_newlines(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
-def apply_search_replace_patch(content, patch_text):
-    matches = list(PATCH_BLOCK_RE.finditer(patch_text))
-    if not matches:
-        raise RuntimeError("No valid SEARCH/REPLACE blocks found in patch")
-    updated = content
-    for match in matches:
-        search = match.group(1)
-        replace = match.group(2)
-        occurrences = updated.count(search)
+def apply_exact_edits(content, edits):
+    """Apply a validated edit list in memory and return content plus counts."""
+    if not isinstance(edits, list) or not edits:
+        raise RuntimeError("edits must be a non-empty array")
+
+    newline = _newline_style(content)
+    updated = _normalise_newlines(content)
+    replacement_counts = []
+
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
+            raise RuntimeError(f"Edit {index} must be an object")
+        unknown = set(edit) - {"old_text", "new_text", "replace_all"}
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise RuntimeError(f"Edit {index} has unknown field(s): {names}")
+
+        old_text = edit.get("old_text")
+        new_text = edit.get("new_text")
+        replace_all = edit.get("replace_all", False)
+        if not isinstance(old_text, str) or not old_text:
+            raise RuntimeError(f"Edit {index} old_text must be a non-empty string")
+        if not isinstance(new_text, str):
+            raise RuntimeError(f"Edit {index} new_text must be a string")
+        if not isinstance(replace_all, bool):
+            raise RuntimeError(f"Edit {index} replace_all must be true or false")
+
+        old_text = _normalise_newlines(old_text)
+        new_text = _normalise_newlines(new_text)
+        if old_text == new_text:
+            raise RuntimeError(f"Edit {index} does not change the matched text")
+
+        occurrences = updated.count(old_text)
         if occurrences == 0:
-            # Fallback: try whitespace-normalized matching
-            search_lines = search.split('\n')
-            norm_search_lines = [re.sub(r'[ \t]+', ' ', l).strip() for l in search_lines]
-            content_lines = updated.split('\n')
+            raise RuntimeError(
+                f"Edit {index} old_text was not found. "
+                "No changes were written. Re-read the target section and use exact text."
+            )
+        if occurrences > 1 and not replace_all:
+            raise RuntimeError(
+                f"Edit {index} old_text matched {occurrences} locations. "
+                "No changes were written. Add more context or set replace_all=true."
+            )
 
-            match_start = None
-            for i in range(len(content_lines) - len(search_lines) + 1):
-                window = [re.sub(r'[ \t]+', ' ', content_lines[i + j]).strip()
-                          for j in range(len(search_lines))]
-                if window == norm_search_lines:
-                    if match_start is not None:
-                        raise RuntimeError(
-                            "SEARCH block matched multiple locations (whitespace-normalized); "
-                            "make the search text more unique"
-                        )
-                    match_start = i
-
-            if match_start is not None:
-                before = content_lines[:match_start]
-                after = content_lines[match_start + len(search_lines):]
-                updated = '\n'.join(before + replace.split('\n') + after)
-                if content.endswith('\n') and not updated.endswith('\n'):
-                    updated += '\n'
-            else:
-                # Provide diagnostic: find closest matching lines
-                from difflib import get_close_matches
-                first_search_line = search_lines[0].strip() if search_lines else ""
-                close = get_close_matches(first_search_line,
-                                          [l.strip() for l in content_lines],
-                                          n=3, cutoff=0.5)
-                hint = ""
-                if close:
-                    hint = f"\n\nNearest lines in file:\n" + "\n".join(f"  {l}" for l in close)
-                    hint += f"\n\nFile has {len(content_lines)} lines. Re-read the target section " \
-                            f"with read_file (result_mode='raw') and retry with exact text."
-                raise RuntimeError(
-                    f"SEARCH block did not match the file content "
-                    f"(tried exact and whitespace-normalized). "
-                    f"First 80 chars of search: {search[:80]!r}{hint}"
-                )
-        elif occurrences > 1:
-            raise RuntimeError("SEARCH block matched multiple locations; make it unique or use regex mode")
+        replacements = occurrences if replace_all else 1
+        if replace_all:
+            updated = updated.replace(old_text, new_text)
         else:
-            updated = updated.replace(search, replace, 1)
-    return updated
+            updated = updated.replace(old_text, new_text, 1)
+        replacement_counts.append(replacements)
 
-# Unified diff patch application from GPT1
-def _strip_patch_path(value):
-    value = value.strip()
-    if value.startswith("a/") or value.startswith("b/"):
-        return value[2:]
-    return value
-
-def apply_unified_patch(cwd, patch_text):
-    """Apply a unified diff patch. Returns list of changed file paths."""
-    lines = patch_text.splitlines(keepends=True)
-    changed_files = []
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
-        if not line.startswith("--- "):
-            idx += 1
-            continue
-        old_path = _strip_patch_path(line[4:].strip().split("\t")[0])
-        idx += 1
-        if idx >= len(lines) or not lines[idx].startswith("+++ "):
-            raise RuntimeError("Malformed patch: expected +++ after ---")
-        new_path = _strip_patch_path(lines[idx][4:].strip().split("\t")[0])
-        idx += 1
-
-        if old_path == "/dev/null":
-            source_lines = []
-        else:
-            source_file = resolve_path(cwd, old_path)
-            if not source_file.exists():
-                raise RuntimeError(f"Patch source file does not exist: {source_file}")
-            source_lines = source_file.read_text(encoding="utf-8").splitlines(keepends=True)
-
-        hunks = []
-        while idx < len(lines) and lines[idx].startswith("@@ "):
-            header = lines[idx]
-            match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", header)
-            if not match:
-                raise RuntimeError(f"Malformed hunk header: {header}")
-            old_start = int(match.group(1))
-            idx += 1
-            hunk_lines = []
-            while idx < len(lines):
-                current = lines[idx]
-                if current.startswith("@@ ") or current.startswith("--- "):
-                    break
-                if current.startswith((" ", "+", "-", "\\")):
-                    hunk_lines.append(current)
-                    idx += 1
-                    continue
-                break
-            hunks.append((old_start, hunk_lines))
-
-        output_lines = []
-        src_index = 0
-        for old_start, hunk_lines in hunks:
-            target_index = max(old_start - 1, 0)
-            output_lines.extend(source_lines[src_index:target_index])
-            src_index = target_index
-            for hline in hunk_lines:
-                marker = hline[:1]
-                if marker == " ":
-                    if src_index < len(source_lines):
-                        output_lines.append(source_lines[src_index])
-                    src_index += 1
-                elif marker == "-":
-                    src_index += 1
-                elif marker == "+":
-                    output_lines.append(hline[1:])
-                elif marker == "\\":
-                    continue
-        output_lines.extend(source_lines[src_index:])
-
-        if new_path == "/dev/null":
-            target_file = resolve_path(cwd, old_path)
-            if target_file.exists():
-                target_file.unlink()
-            changed_files.append(str(target_file))
-            continue
-        target_file = resolve_path(cwd, new_path)
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        target_file.write_text("".join(output_lines), encoding="utf-8")
-        changed_files.append(str(target_file))
-
-    if not changed_files:
-        raise RuntimeError("Patch contained no file diffs")
-    return changed_files
+    if newline != "\n":
+        updated = updated.replace("\n", newline)
+    return updated, replacement_counts
 
 # JSON fallback tool call parsing from GPT1
 def parse_fallback_tool_calls(text):
@@ -4036,34 +3941,49 @@ TOOLS = [
         "function": {
             "name": "edit_file",
             "description": (
-                "Edit a file. ALWAYS read the target section first (result_mode='raw') so your edits are exact.\n"
-                "Modes:\n"
-                "1. search_replace (PREFERRED): <<<<<<< SEARCH / ======= / >>>>>>> REPLACE blocks. "
-                "Search text must match exactly and uniquely. Multiple blocks allowed.\n"
-                "2. line_range: Replace lines start_line through end_line (inclusive) with new_content. "
-                "Most reliable when you have line numbers from read_file.\n"
-                "3. insert: Insert insert_content after after_line (0 to prepend).\n"
-                "4. regex: Python re.sub with pattern/replacement/flags. Good for mechanical bulk changes.\n"
-                "5. unified_diff: Standard patch format. LEAST RELIABLE — prefer search_replace or line_range."
+                "Apply exact text replacements to an existing UTF-8 file. Read the current target "
+                "section first. Each old_text must match exactly once unless replace_all=true. "
+                "Edits run in array order and are transactional: if any edit fails, the file stays "
+                "unchanged. Use an empty new_text to delete text. To insert text, replace an exact "
+                "anchor with the anchor plus the new text. The result includes the applied diff."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["search_replace", "line_range", "insert", "regex", "unified_diff"]},
-                    "patch": {"type": "string", "description": "SEARCH/REPLACE blocks or unified diff text"},
-                    "start_line": {"type": "integer", "minimum": 1, "description": "First line to replace (1-based, for line_range mode)"},
-                    "end_line": {"type": "integer", "minimum": 1, "description": "Last line to replace inclusive (1-based, for line_range mode)"},
-                    "new_content": {"type": "string", "description": "Replacement content (for line_range mode). May be empty string to delete lines."},
-                    "after_line": {"type": "integer", "minimum": 0, "description": "Insert content after this line number; 0 to prepend (for insert mode)"},
-                    "insert_content": {"type": "string", "description": "Content to insert (for insert mode)"},
-                    "pattern": {"type": "string", "description": "Regex pattern (for regex mode)"},
-                    "replacement": {"type": "string", "description": "Replacement text (for regex mode)"},
-                    "flags": {"type": "string", "description": "Regex flags: i,m,s,x or IGNORECASE,MULTILINE,DOTALL,VERBOSE"},
-                    "count": {"type": "integer", "minimum": 0, "description": "Max replacements for regex (0=all)"},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Exact replacements, applied in array order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Exact current text to replace. Include context so it is unique.",
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "description": "Replacement text. Use an empty string to delete old_text.",
+                                },
+                                "replace_all": {
+                                    "type": "boolean",
+                                    "description": "Replace every exact match. Default: false.",
+                                },
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "expected_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-fA-F]{64}$",
+                        "description": "Optional SHA-256 from read_file. The edit fails if the file changed.",
+                    },
                     "result_mode": RESULT_MODE_PROP,
                 },
-                "required": ["path", "mode", "result_mode"],
+                "required": ["path", "edits", "result_mode"],
             },
         },
     },
@@ -5347,10 +5267,12 @@ run_command (python3 -c, jq, csvkit) before finalizing. Prefer write_file \
 over inline output for anything over ~100 rows or fields.
 
 ## File Editing
-ALWAYS read the target section first (result_mode="raw") so your edit is \
-based on actual content, never assumptions. Prefer search_replace mode — \
-it is the most reliable. Use line_range when you have line numbers from \
-read_file. After editing, re-read the changed region to verify.
+Read the target section first with result_mode="raw" so old_text is current \
+and exact. Put related replacements for one file in one edits array. The tool \
+validates every replacement before it writes the file. Use an empty new_text \
+to delete text. To insert text, replace a unique anchor with the anchor plus \
+the new text. The returned diff verifies the edit. Re-read only when the diff \
+is unexpected or another process can change the file.
 
 ## Coding & Heavy Computation
 Default to Python for scripts — it is the most compatible, and run_code runs it \
@@ -5402,17 +5324,10 @@ BAD result_mode goals (too vague — avoid these):
 files. Line numbers are always shown.
 - write_file: creates parent directories automatically. Use mode="create_only" \
 to prevent accidental overwrites of existing output files.
-- edit_file mode=search_replace: MOST RELIABLE. Use <<<<<<< SEARCH / ======= / \
->>>>>>> REPLACE blocks. Search text must match the file EXACTLY and UNIQUELY. \
-Multiple blocks allowed for multiple edits in the same file.
-- edit_file mode=line_range: MOST DETERMINISTIC. Specify start_line/end_line \
-and new_content. Use when you have line numbers from a prior read_file.
-- edit_file mode=insert: Insert content after a specific line without \
-replacing anything.
-- edit_file mode=regex: Python re.sub with pattern/replacement/flags. Good \
-for mechanical bulk changes across a file.
-- edit_file mode=unified_diff: Standard patch format. LEAST RELIABLE — \
-context lines are error-prone. Prefer search_replace or line_range.
+- edit_file: send an edits array of exact old_text/new_text pairs. Each \
+old_text must be unique unless replace_all=true. The call is transactional, \
+so one failed replacement leaves the file unchanged. Supply expected_sha256 \
+from read_file when you must detect outside changes. The result contains a diff.
 - search_file: content_query uses ripgrep — fast, regex-capable, \
 .gitignore-aware.
 - run_command: result_mode="did tests pass, which failed and why" not "raw" \
@@ -5511,9 +5426,8 @@ and more predictable.
 </tool_tips>
 
 <error_recovery>
-- If edit_file search_replace fails with "did not match", re-read the file \
-with result_mode="raw" and start_line/end_line around the target area, then \
-retry with exact text from the file.
+- If edit_file reports that old_text was not found or was not unique, re-read \
+the target area with result_mode="raw". Retry with exact text and more context.
 - If a command times out, consider: is there a simpler/faster alternative? \
 Can you add flags to reduce output?
 - If a web search returns nothing useful, rephrase the query. Try different \
@@ -6202,15 +6116,22 @@ class Agent:
                 return json.dumps(info, indent=2)
             text = data.decode("utf-8", errors="replace")
             total_lines = len(text.splitlines())
+            digest = hashlib.sha256(data).hexdigest()
             if start_line is not None or end_line is not None:
                 lines = text.splitlines()
                 s = max((int(start_line) if start_line else 1) - 1, 0)
                 e = int(end_line) if end_line else len(lines)
                 numbered = [f"{idx}: {line}" for idx, line in enumerate(lines[s:e], start=s + 1)]
-                header = f"[File: {path} | Lines {s+1}-{min(e, total_lines)} of {total_lines}]"
+                header = (
+                    f"[File: {path} | Lines {s+1}-{min(e, total_lines)} of {total_lines} "
+                    f"| SHA-256: {digest}]"
+                )
                 text = header + "\n" + "\n".join(numbered)
             else:
-                header = f"[File: {path} | {total_lines} lines | {len(data)} bytes]"
+                header = (
+                    f"[File: {path} | {total_lines} lines | {len(data)} bytes "
+                    f"| SHA-256: {digest}]"
+                )
                 text = header + "\n" + text
             if cache_key:
                 self._file_read_cache[cache_key] = text
@@ -6272,70 +6193,69 @@ class Agent:
             "matches": files
         }, indent=2)
 
-    async def _tool_edit_file(self, path, mode, patch=None, pattern=None,
-                              replacement=None, flags=None, count=None,
-                              start_line=None, end_line=None, new_content=None,
-                              after_line=None, insert_content=None, **kw):
+    async def _tool_edit_file(self, path, edits, expected_sha256=None, **kw):
         p = resolve_path(self.cwd, path)
         if p == Path.home() / ".dtt" / "env":
             return "Error: Direct file access to ~/.dtt/env is blocked for security. Use the manage_config tool instead."
         if not p.exists():
             return f"Error: File not found: {path}"
+        if not p.is_file():
+            return f"Error: Not a regular file: {path}"
         lock = await self._get_file_lock(str(p))
         async with lock:
             try:
-                original = p.read_text(encoding="utf-8", errors="replace")
-                updated = original
+                original_bytes = p.read_bytes()
+                if is_binary_data(original_bytes):
+                    return f"Error: edit_file only supports UTF-8 text files: {path}"
+                try:
+                    original = original_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    return f"Error: edit_file only supports UTF-8 text files: {path}"
 
-                if mode == "search_replace":
-                    if not patch:
-                        return "Error: patch is required for search_replace mode"
-                    updated = apply_search_replace_patch(original, patch)
-                elif mode == "line_range":
-                    if start_line is None or end_line is None:
-                        return "Error: start_line and end_line are required for line_range mode"
-                    if int(start_line) > int(end_line):
-                        return f"Error: Invalid line range. start_line ({start_line}) must be <= end_line ({end_line})."
-                    lines = original.splitlines(keepends=True)
-                    s = max(int(start_line) - 1, 0)
-                    e = min(int(end_line), len(lines))
-                    if s >= len(lines):
-                        return f"Error: start_line {start_line} exceeds file length ({len(lines)} lines)"
-                    replacement_text = new_content if new_content is not None else ""
-                    replacement_lines = replacement_text.splitlines(keepends=True)
-                    if replacement_lines and not replacement_lines[-1].endswith("\n"):
-                        replacement_lines[-1] += "\n"
-                    updated = "".join(lines[:s] + replacement_lines + lines[e:])
-                elif mode == "insert":
-                    if insert_content is None:
-                        return "Error: insert_content is required for insert mode"
-                    if after_line is None:
-                        return "Error: after_line is required for insert mode (use 0 to prepend)"
-                    lines = original.splitlines(keepends=True)
-                    pos = min(int(after_line), len(lines))
-                    new_lines = insert_content.splitlines(keepends=True)
-                    if new_lines and not new_lines[-1].endswith("\n"):
-                        new_lines[-1] += "\n"
-                    updated = "".join(lines[:pos] + new_lines + lines[pos:])
-                elif mode == "regex":
-                    if not pattern:
-                        return "Error: pattern is required for regex mode"
-                    re_flags = parse_regex_flags(flags or "")
-                    cnt = int(count) if count else 0
-                    updated, n = re.subn(pattern, replacement or "", original, count=cnt, flags=re_flags)
-                    if n == 0:
-                        return f"Error: Regex pattern not found in {path}"
-                elif mode == "unified_diff":
-                    if not patch:
-                        return "Error: patch is required for unified_diff mode"
-                    changed = apply_unified_patch(self.cwd, patch)
-                    return json.dumps({"mode": "unified_diff", "changed_files": changed}, indent=2)
-                else:
-                    return f"Error: Unknown edit mode '{mode}'. Use search_replace, line_range, insert, regex, or unified_diff."
+                before_hash = hashlib.sha256(original_bytes).hexdigest()
+                if expected_sha256 is not None:
+                    if not isinstance(expected_sha256, str) or not re.fullmatch(
+                        r"[0-9a-fA-F]{64}", expected_sha256
+                    ):
+                        return "Error: expected_sha256 must contain 64 hexadecimal characters"
+                    if before_hash != expected_sha256.lower():
+                        return (
+                            f"Error editing {path}: The file changed after it was read. "
+                            f"Expected SHA-256 {expected_sha256.lower()}, found {before_hash}. "
+                            "No changes were written. Re-read the target section and retry."
+                        )
+
+                updated, replacement_counts = apply_exact_edits(original, edits)
 
                 if updated == original:
                     return "Warning: No changes were applied."
-                p.write_text(updated, encoding="utf-8")
+
+                updated_bytes = updated.encode("utf-8")
+                original_mode = stat.S_IMODE(p.stat().st_mode)
+                fd, temp_name = tempfile.mkstemp(
+                    dir=str(p.parent), prefix=f".{p.name}.dtt-", suffix=".tmp"
+                )
+                temp_path = Path(temp_name)
+                try:
+                    with os.fdopen(fd, "wb") as temp_file:
+                        temp_file.write(updated_bytes)
+                        temp_file.flush()
+                        os.fsync(temp_file.fileno())
+                    os.chmod(temp_path, original_mode)
+                    os.replace(temp_path, p)
+                    temp_path = None
+                    try:
+                        directory_fd = os.open(str(p.parent), os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    except OSError:
+                        pass
+                finally:
+                    if temp_path is not None:
+                        temp_path.unlink(missing_ok=True)
+
                 # Invalidate read cache for this path
                 self._file_read_cache = {
                     k: v for k, v in self._file_read_cache.items()
@@ -6345,14 +6265,15 @@ class Agent:
                     original.splitlines(), updated.splitlines(),
                     fromfile=str(p), tofile=str(p), lineterm="",
                 ))
-                return diff or "Edit applied (no visible diff)."
+                after_hash = hashlib.sha256(updated_bytes).hexdigest()
+                summary = (
+                    f"Applied {len(replacement_counts)} edit(s) and "
+                    f"{sum(replacement_counts)} replacement(s) to {p}.\n"
+                    f"SHA-256: {before_hash} -> {after_hash}"
+                )
+                return f"{summary}\n\n{diff}" if diff else f"{summary}\n\nEdit applied."
             except RuntimeError as e:
-                err_msg = str(e)
-                if "did not match" in err_msg and "Nearest lines" not in err_msg:
-                    lines = original.splitlines()
-                    preview = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines[:30]))
-                    err_msg += f"\n\nFirst 30 lines of {path} for reference:\n{preview}"
-                return f"Error editing {path}: {err_msg}"
+                return f"Error editing {path}: {e}"
             except Exception as e:
                 return f"Error editing {path}: {e}"
 

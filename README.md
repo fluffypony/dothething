@@ -193,6 +193,8 @@ dtt --model main=openai/gpt-5.6-sol --model browser=~anthropic/claude-sonnet-lat
 
 **File operations:** `read_file`, `write_file`, `edit_file`, `batch_read`, `diff_files`
 
+`edit_file` applies an ordered array of exact `old_text`/`new_text` replacements. It validates the full array before it writes, rejects ambiguous matches by default, and returns the applied diff. `read_file` includes a SHA-256 value that `edit_file` can use to reject stale edits.
+
 **System:** `run_command`, `shell_session`, `run_code`, `glob`, `list_dir`, `search_file`, `clipboard_copy`, `clipboard_paste`, `computer_use` (macOS GUI control via Peekaboo), `request_user_input`
 
 **Web:** `search_web` (hybrid Serper + SearXNG for general discovery, plus engine/category targeting; general-web engines fetch through Notte), `fetch_page` (Notte-powered scraping), `browser_agent` (full interactive control), `http_request`
