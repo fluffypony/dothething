@@ -469,6 +469,56 @@ NOTTE_REPO="https://github.com/fluffypony/notte.git"
 NOTTE_PACKAGES="notte-core notte-llm notte-browser notte-sdk notte-agent"
 
 if [ "$(cat "$DTT_CACHE/.notte_pin" 2>/dev/null)" != "$NOTTE_PIN" ]; then
+    # MCP clients can retry a slow first start while the original process is
+    # still installing. Serialise the shared checkout and venv update so one
+    # process cannot remove files while another process is passing them to pip.
+    (
+    notte_lock="$DTT_CACHE/.notte_install.lock"
+    notte_waited=0
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$notte_lock"
+        if ! flock -n 9; then
+            echo "▸ Waiting for another DTT process to install Notte..."
+            if ! flock -w 900 9; then
+                echo "✗ Timed out waiting for the Notte install lock" >&2
+                exit 1
+            fi
+        fi
+    elif command -v shlock >/dev/null 2>&1; then
+        while ! shlock -f "$notte_lock" -p "$$"; do
+            if [ "$notte_waited" -eq 0 ]; then
+                echo "▸ Waiting for another DTT process to install Notte..."
+            fi
+            if [ "$notte_waited" -ge 900 ]; then
+                echo "✗ Timed out waiting for the Notte install lock" >&2
+                exit 1
+            fi
+            sleep 1
+            notte_waited=$((notte_waited + 1))
+        done
+        trap 'rm -f "$notte_lock"' EXIT
+    else
+        notte_lock_dir="$notte_lock.d"
+        while ! mkdir "$notte_lock_dir" 2>/dev/null; do
+            if [ "$notte_waited" -eq 0 ]; then
+                echo "▸ Waiting for another DTT process to install Notte..."
+            fi
+            if [ "$notte_waited" -ge 900 ]; then
+                echo "✗ Timed out waiting for the Notte install lock" >&2
+                exit 1
+            fi
+            sleep 1
+            notte_waited=$((notte_waited + 1))
+        done
+        trap 'rmdir "$notte_lock_dir" 2>/dev/null || true' EXIT
+    fi
+
+    # The process that held the lock can have finished while this process
+    # waited. In that case the installed packages are already current.
+    if [ "$(cat "$DTT_CACHE/.notte_pin" 2>/dev/null)" = "$NOTTE_PIN" ]; then
+        exit 0
+    fi
+
     echo "▸ Installing/updating Notte browser framework..."
     # Clone once and install out of that checkout, rather than handing pip a
     # git URL. Notte is a monorepo whose packages declare each other as git
@@ -552,6 +602,7 @@ PY
     echo "$NOTTE_PIN" > "$DTT_CACHE/.notte_pin"
     rm -f "$DTT_CACHE/.notte_v3"   # superseded by .notte_pin
     echo "  ✓ Notte ${NOTTE_PIN:0:8} installed"
+    )
 fi
 
 # ── Peekaboo (macOS computer use) ──────────────────────────────
