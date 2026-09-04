@@ -3,7 +3,7 @@
 # https://github.com/fluffypony/dothething | https://dotheth.ing
 set -euo pipefail
 
-DTT_VERSION="3.0.8"
+DTT_VERSION="3.0.9"
 _dtt_s="$0"
 [[ "$_dtt_s" != */* ]] && _dtt_s="$(command -v "$_dtt_s" 2>/dev/null || echo "$_dtt_s")"
 DTT_SELF="$(realpath "$_dtt_s" 2>/dev/null || echo "$(cd "$(dirname "$_dtt_s")" && pwd -P)/$(basename "$_dtt_s")")"
@@ -463,7 +463,7 @@ fi
 # Previously this installed @main behind a one-shot marker, meaning each user
 # ended up on whatever main happened to be the day they first ran dtt, and
 # never moved off it.
-NOTTE_PIN="c697cd9596cb9809a41538ff8f2c02429335810c"
+NOTTE_PIN="733e77e0f9cdbca225bd85517371131187a41932"
 NOTTE_REPO="https://github.com/fluffypony/notte.git"
 # Dependency order, so each is present before whatever imports it.
 NOTTE_PACKAGES="notte-core notte-llm notte-browser notte-sdk notte-agent"
