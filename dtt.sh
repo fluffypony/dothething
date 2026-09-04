@@ -468,11 +468,10 @@ NOTTE_REPO="https://github.com/fluffypony/notte.git"
 # Dependency order, so each is present before whatever imports it.
 NOTTE_PACKAGES="notte-core notte-llm notte-browser notte-sdk notte-agent"
 
-if [ "$(cat "$DTT_CACHE/.notte_pin" 2>/dev/null)" != "$NOTTE_PIN" ]; then
+install_notte() (
     # MCP clients can retry a slow first start while the original process is
     # still installing. Serialise the shared checkout and venv update so one
     # process cannot remove files while another process is passing them to pip.
-    (
     notte_lock="$DTT_CACHE/.notte_install.lock"
     notte_waited=0
     if command -v flock >/dev/null 2>&1; then
@@ -602,7 +601,22 @@ PY
     echo "$NOTTE_PIN" > "$DTT_CACHE/.notte_pin"
     rm -f "$DTT_CACHE/.notte_v3"   # superseded by .notte_pin
     echo "  ✓ Notte ${NOTTE_PIN:0:8} installed"
-    )
+)
+
+export DTT_NOTTE_PIN="$NOTTE_PIN"
+if [ "$(cat "$DTT_CACHE/.notte_pin" 2>/dev/null)" != "$NOTTE_PIN" ]; then
+    if [ "$BROWSER_MCP" = true ]; then
+        # Complete a slow Notte update after the MCP server has answered its
+        # handshake. Browser tools report that they are starting until this
+        # process updates the pin; the MCP connection itself stays available.
+        notte_background_log="$BASE/notte_mcp_install_$$.log"
+        install_notte >"$notte_background_log" 2>&1 3>&- &
+        export DTT_NOTTE_INSTALL_PID=$!
+        export DTT_NOTTE_INSTALL_LOG="$notte_background_log"
+        echo "▸ Updating Notte in the background (log: $notte_background_log)" >&2
+    else
+        install_notte
+    fi
 fi
 
 # ── Peekaboo (macOS computer use) ──────────────────────────────
@@ -10426,14 +10440,53 @@ async def run_browser_mcp():
                   mode="normal")
     agent._mcp_mode = True
     agent.spinner = Spinner(enabled=False)
-    await agent.setup()
-    print("  ✓ search + browser stack ready. Tools: dtt_search, dtt_fetch, "
-          "dtt_browser, dtt_browser_agent", file=sys.stderr)
 
     server = Server("dothething-browser", version="1.0")
+    setup_task = None
+
+    async def setup_agent():
+        # Let the MCP transport send its initialize and tools/list responses
+        # before synchronous local-service startup can occupy the event loop.
+        await asyncio.sleep(0.1)
+        await agent.setup()
+        print("  ✓ search + browser stack ready. Tools: dtt_search, dtt_fetch, "
+              "dtt_browser, dtt_browser_agent", file=sys.stderr)
+
+    def start_setup():
+        nonlocal setup_task
+        if setup_task is None:
+            setup_task = asyncio.create_task(setup_agent())
+        return setup_task
+
+    async def runtime_error():
+        expected_pin = os.environ.get("DTT_NOTTE_PIN")
+        if expected_pin:
+            marker = Path.home() / ".dtt" / "cache" / ".notte_pin"
+            try:
+                installed_pin = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                installed_pin = ""
+            if installed_pin != expected_pin:
+                install_log = os.environ.get("DTT_NOTTE_INSTALL_LOG", "the DTT Notte install log")
+                try:
+                    install_pid = int(os.environ.get("DTT_NOTTE_INSTALL_PID", ""))
+                    os.kill(install_pid, 0)
+                except (OSError, TypeError, ValueError):
+                    return f"The Notte update failed. See {install_log}, then restart the DTT MCP server."
+                return f"Notte is still updating in the background. Retry this tool shortly. Progress: {install_log}"
+
+        task = start_setup()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        except asyncio.TimeoutError:
+            return "The DTT search and browser stack is still starting. Retry this tool shortly."
+        except Exception as e:
+            return f"The DTT search and browser stack failed to start: {e}"
+        return None
 
     @server.list_tools()
     async def on_list_tools():
+        start_setup()
         return _browser_mcp_tools(types)
 
     async def dispatch(name, a):
@@ -10473,6 +10526,11 @@ async def run_browser_mcp():
     @server.call_tool()
     async def on_call_tool(name, arguments):
         try:
+            error = await runtime_error()
+            if error is not None:
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=error)],
+                    isError=True)
             text = await dispatch(name, arguments or {})
             return types.CallToolResult(content=[types.TextContent(type="text", text=str(text))])
         except Exception as e:
@@ -10482,10 +10540,19 @@ async def run_browser_mcp():
                 content=[types.TextContent(type="text", text=f"Error: {e}")],
                 isError=True)
 
+    print("  ✓ MCP transport ready; the search and browser stack starts in the background", file=sys.stderr)
     try:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
     finally:
+        if setup_task is not None and not setup_task.done():
+            setup_task.cancel()
+            try:
+                await setup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         await agent.cleanup()
 
 
